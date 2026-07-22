@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+.venv
+user_data.csv
+*.xlsx
+.streamlit/
+.DS_Store
+*.log
