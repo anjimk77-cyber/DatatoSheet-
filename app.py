@@ -278,19 +278,4 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
-# Clear button
-st.markdown("---")
-st.markdown("### 🗑️ Delete All Records")
-
-col_delete = st.columns([1, 1, 1])
-with col_delete[1]:
-    if st.button("Delete All Records", width='stretch'):
-        try:
-            clear_all_data()
-            st.success("✅ All records deleted successfully!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ Could not clear Google Sheet: {e}")
-
-st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
