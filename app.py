@@ -34,6 +34,21 @@ div[role="listbox"] {
     overflow: visible !important;
     text-overflow: unset !important;
 }
+
+/* Selected tags shown inside a closed multiselect cell: let them wrap onto
+   multiple lines and grow the box taller, instead of clipping in one row */
+div[data-baseweb="select"] > div {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    min-height: 38px !important;
+}
+div[data-baseweb="tag"] {
+    white-space: normal !important;
+    max-width: 100% !important;
+}
+span[data-baseweb="tag"] {
+    white-space: normal !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,7 +202,8 @@ with col6:
 st.markdown("#### 🐟 Pond Details")
 
 # Header row (labels only)
-h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12 = st.columns([1.1, 0.8, 0.7, 0.9, 1, 1.3, 1.2, 1.3, 1.2, 1, 1.3, 0.5])
+COLUMN_WIDTHS = [0.9, 0.6, 0.6, 0.8, 0.9, 1.8, 1.6, 1.8, 1.6, 1.1, 1.8, 0.5]
+h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12 = st.columns(COLUMN_WIDTHS)
 for h, label in zip(
     [h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11],
     ["Pond Number", "Density", "DOC", "Feed/Day", "ABW", "Diseases Issue", "FEED Issue",
@@ -200,9 +216,7 @@ water_color_choices = ["-- Select --"] + WATER_COLOR_OPTIONS
 with st.container(border=True):
     for rid in st.session_state.row_ids:
         row = st.session_state.rows_data[rid]
-        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(
-            [1.1, 0.8, 0.7, 0.9, 1, 1.3, 1.2, 1.3, 1.2, 1, 1.3, 0.5]
-        )
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(COLUMN_WIDTHS)
         with c1:
             row["pond_number"] = st.text_input("Pond Number", value=row["pond_number"], key=f"pond_number_{rid}", label_visibility="collapsed")
         with c2:
