@@ -57,11 +57,18 @@ div[data-testid="stHorizontalBlock"] {
     flex-wrap: nowrap !important;
     overflow-x: auto !important;
     -webkit-overflow-scrolling: touch !important;
+    align-items: flex-start !important;
 }
 div[data-testid="column"] {
-    min-width: 240px !important;
-    flex: 0 0 auto !important;
-    width: 240px !important;
+    min-width: 260px !important;
+    flex: 0 0 260px !important;
+    width: 260px !important;
+    box-sizing: border-box !important;
+}
+/* Parent wrappers must not clip the horizontal scroll area */
+div[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stVerticalBlock"] {
+    overflow-x: visible !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -223,7 +230,7 @@ for h, label in zip(
     ["Pond Number", "Density", "DOC", "Feed/Day", "ABW", "Diseases Issue", "FEED Issue",
      "Water Quality Issue", "Environment Issue", "Water Color *", "Management & Equipment Issue"]
 ):
-    h.markdown(f"**{label}**")
+    h.markdown(f"<b>{label}</b>", unsafe_allow_html=True)
 
 water_color_choices = ["-- Select --"] + WATER_COLOR_OPTIONS
 
@@ -413,6 +420,5 @@ if len(df) > 0:
         )
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
-
 
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
