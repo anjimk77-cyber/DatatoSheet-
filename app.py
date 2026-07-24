@@ -60,9 +60,9 @@ div[data-testid="stHorizontalBlock"] {
     align-items: flex-start !important;
 }
 div[data-testid="column"] {
-    min-width: 260px !important;
-    flex: 0 0 260px !important;
-    width: 260px !important;
+    min-width: 340px !important;
+    flex: 0 0 340px !important;
+    width: 340px !important;
     box-sizing: border-box !important;
 }
 /* Parent wrappers must not clip the horizontal scroll area */
@@ -421,4 +421,17 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
+# Clear button always visible
+st.markdown("---")
+st.markdown("### 🗑️ Delete All Records")
+
+col_delete = st.columns([1, 1, 1])
+with col_delete[1]:
+    if st.button("Delete All Records", use_container_width=True):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            st.success("✅ All records deleted successfully!")
+            st.rerun()
+
+st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
