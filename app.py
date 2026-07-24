@@ -50,9 +50,10 @@ span[data-baseweb="tag"] {
     white-space: normal !important;
 }
 
-/* Keep every column at a readable minimum width instead of letting it shrink
-   to fit the screen. If the row is wider than the screen, it scrolls
-   horizontally rather than squeezing each cell unreadably small. */
+/* Let each column size itself to fit whatever is inside it, instead of a
+   fixed width. Short entries stay narrow, long entries/selections make the
+   column grow. The overall row still scrolls horizontally if it doesn't
+   fit the screen. */
 div[data-testid="stHorizontalBlock"] {
     flex-wrap: nowrap !important;
     overflow-x: auto !important;
@@ -60,10 +61,23 @@ div[data-testid="stHorizontalBlock"] {
     align-items: flex-start !important;
 }
 div[data-testid="column"] {
-    min-width: 340px !important;
-    flex: 0 0 340px !important;
-    width: 340px !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 110px !important;
     box-sizing: border-box !important;
+}
+/* Let the text inputs and select boxes shrink/grow with their content
+   instead of stretching to fill a fixed-width parent */
+div[data-testid="stTextInput"] input {
+    width: auto !important;
+    min-width: 90px !important;
+}
+div[data-baseweb="select"] {
+    width: auto !important;
+    min-width: 110px !important;
+}
+div[data-baseweb="select"] > div {
+    width: auto !important;
 }
 /* Parent wrappers must not clip the horizontal scroll area */
 div[data-testid="stVerticalBlockBorderWrapper"],
@@ -421,17 +435,4 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
-# Clear button always visible
-st.markdown("---")
-st.markdown("### 🗑️ Delete All Records")
-
-col_delete = st.columns([1, 1, 1])
-with col_delete[1]:
-    if st.button("Delete All Records", use_container_width=True):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-            st.success("✅ All records deleted successfully!")
-            st.rerun()
-
-st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
