@@ -49,6 +49,20 @@ div[data-baseweb="tag"] {
 span[data-baseweb="tag"] {
     white-space: normal !important;
 }
+
+/* Keep every column at a readable minimum width instead of letting it shrink
+   to fit the screen. If the row is wider than the screen, it scrolls
+   horizontally rather than squeezing each cell unreadably small. */
+div[data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+}
+div[data-testid="column"] {
+    min-width: 170px !important;
+    flex: 0 0 auto !important;
+    width: 170px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -400,4 +414,17 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
+# Clear button always visible
+st.markdown("---")
+st.markdown("### 🗑️ Delete All Records")
+
+col_delete = st.columns([1, 1, 1])
+with col_delete[1]:
+    if st.button("Delete All Records", use_container_width=True):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            st.success("✅ All records deleted successfully!")
+            st.rerun()
+
+st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
