@@ -154,43 +154,53 @@ with col6:
     cycle = st.selectbox("Cycle Type *", CYCLE_TYPE)
 
 st.markdown("#### 🐟 Pond Details")
-st.caption("Tap a pond row below to open it and enter its details.")
+
+# Header row (labels only)
+h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12 = st.columns([1.1, 0.8, 0.7, 0.9, 1, 1.3, 1.2, 1.3, 1.2, 1, 1.3, 0.5])
+for h, label in zip(
+    [h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11],
+    ["Pond Number", "Density", "DOC", "Feed/Day", "ABW", "Diseases Issue", "FEED Issue",
+     "Water Quality Issue", "Environment Issue", "Water Color *", "Management & Equipment Issue"]
+):
+    h.markdown(f"**{label}**")
 
 water_color_choices = ["-- Select --"] + WATER_COLOR_OPTIONS
 
-for i, rid in enumerate(st.session_state.row_ids):
-    row = st.session_state.rows_data[rid]
-    pond_label = row["pond_number"].strip() if row["pond_number"].strip() else f"Row {i + 1}"
-    with st.expander(f"🐟 Pond {pond_label}", expanded=True):
-        row["pond_number"] = st.text_input("Pond Number (Ex: 1,2,3 or A,B,C...)", value=row["pond_number"], key=f"pond_number_{rid}")
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            row["density"] = st.text_input("Density (PL stocking)", value=row["density"], key=f"density_{rid}")
-        with col_b:
-            row["doc"] = st.text_input("DOC (Days of Culture)", value=row["doc"], key=f"doc_{rid}")
-
-        col_c, col_d = st.columns(2)
-        with col_c:
-            row["feed_per_day"] = st.text_input("Feed Per Day (kg)", value=row["feed_per_day"], key=f"feed_per_day_{rid}")
-        with col_d:
-            row["abw"] = st.text_input("ABW (Additional Details)", value=row["abw"], key=f"abw_{rid}")
-
-        row["diseases"] = st.multiselect("Diseases Issue", DISEASES_OPTIONS, default=row["diseases"], key=f"diseases_{rid}")
-        row["feed_issue"] = st.multiselect("FEED Issue", FEED_ISSUE_OPTIONS, default=row["feed_issue"], key=f"feed_issue_{rid}")
-        row["water_quality"] = st.multiselect("Water Quality Issue", WATER_QUALITY_OPTIONS, default=row["water_quality"], key=f"water_quality_{rid}")
-        row["env_issue"] = st.multiselect("Environment Issue", ENVIRONMENT_ISSUE_OPTIONS, default=row["env_issue"], key=f"env_issue_{rid}")
-
-        wc_default = row["water_color"] if row["water_color"] in WATER_COLOR_OPTIONS else "-- Select --"
-        wc_selected = st.selectbox("Water Color *", water_color_choices, index=water_color_choices.index(wc_default), key=f"water_color_{rid}")
-        row["water_color"] = wc_selected if wc_selected != "-- Select --" else ""
-
-        row["management_issue"] = st.multiselect("Management & Equipment Issue", MANAGEMENT_ISSUE_OPTIONS, default=row["management_issue"], key=f"management_issue_{rid}")
-
-        if st.button("🗑️ Remove this row", key=f"remove_{rid}"):
-            st.session_state.row_ids.remove(rid)
-            del st.session_state.rows_data[rid]
-            st.rerun()
+with st.container(border=True):
+    for rid in st.session_state.row_ids:
+        row = st.session_state.rows_data[rid]
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(
+            [1.1, 0.8, 0.7, 0.9, 1, 1.3, 1.2, 1.3, 1.2, 1, 1.3, 0.5]
+        )
+        with c1:
+            row["pond_number"] = st.text_input("Pond Number", value=row["pond_number"], key=f"pond_number_{rid}", label_visibility="collapsed")
+        with c2:
+            row["density"] = st.text_input("Density", value=row["density"], key=f"density_{rid}", label_visibility="collapsed")
+        with c3:
+            row["doc"] = st.text_input("DOC", value=row["doc"], key=f"doc_{rid}", label_visibility="collapsed")
+        with c4:
+            row["feed_per_day"] = st.text_input("Feed/Day", value=row["feed_per_day"], key=f"feed_per_day_{rid}", label_visibility="collapsed")
+        with c5:
+            row["abw"] = st.text_input("ABW", value=row["abw"], key=f"abw_{rid}", label_visibility="collapsed")
+        with c6:
+            row["diseases"] = st.multiselect("Diseases", DISEASES_OPTIONS, default=row["diseases"], key=f"diseases_{rid}", label_visibility="collapsed")
+        with c7:
+            row["feed_issue"] = st.multiselect("Feed Issue", FEED_ISSUE_OPTIONS, default=row["feed_issue"], key=f"feed_issue_{rid}", label_visibility="collapsed")
+        with c8:
+            row["water_quality"] = st.multiselect("Water Quality", WATER_QUALITY_OPTIONS, default=row["water_quality"], key=f"water_quality_{rid}", label_visibility="collapsed")
+        with c9:
+            row["env_issue"] = st.multiselect("Environment", ENVIRONMENT_ISSUE_OPTIONS, default=row["env_issue"], key=f"env_issue_{rid}", label_visibility="collapsed")
+        with c10:
+            wc_default = row["water_color"] if row["water_color"] in WATER_COLOR_OPTIONS else "-- Select --"
+            wc_selected = st.selectbox("Water Color", water_color_choices, index=water_color_choices.index(wc_default), key=f"water_color_{rid}", label_visibility="collapsed")
+            row["water_color"] = wc_selected if wc_selected != "-- Select --" else ""
+        with c11:
+            row["management_issue"] = st.multiselect("Management", MANAGEMENT_ISSUE_OPTIONS, default=row["management_issue"], key=f"management_issue_{rid}", label_visibility="collapsed")
+        with c12:
+            if st.button("🗑️", key=f"remove_{rid}", help="Remove this row"):
+                st.session_state.row_ids.remove(rid)
+                del st.session_state.rows_data[rid]
+                st.rerun()
 
 if st.button("➕ Add Row"):
     new_id = st.session_state.next_row_id
@@ -345,17 +355,4 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
-# Clear button always visible
-st.markdown("---")
-st.markdown("### 🗑️ Delete All Records")
-
-col_delete = st.columns([1, 1, 1])
-with col_delete[1]:
-    if st.button("Delete All Records", use_container_width=True):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-            st.success("✅ All records deleted successfully!")
-            st.rerun()
-
-st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
