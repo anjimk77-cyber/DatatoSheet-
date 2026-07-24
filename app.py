@@ -6,6 +6,31 @@ from datetime import datetime
 # Configure page
 st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide")
 
+# Fix: on narrow/mobile widths, Streamlit's selectbox/multiselect dropdown menus
+# truncate long option text with an ellipsis. This CSS lets the popover menu
+# options wrap onto multiple lines and expand to their full width so the
+# complete text is always visible when a field is tapped/clicked.
+st.markdown("""
+<style>
+/* Dropdown option list (applies to selectbox & multiselect popovers) */
+div[data-baseweb="popover"] ul[role="listbox"] {
+    min-width: fit-content !important;
+    max-width: 90vw !important;
+}
+div[data-baseweb="popover"] li[role="option"] {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    word-break: break-word !important;
+}
+div[data-baseweb="popover"] li[role="option"] > div {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # Title
 st.title("💧 Water Quality Report - Data Collection")
 st.subheader("KMN Aqua Services")
@@ -355,4 +380,17 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
+# Clear button always visible
+st.markdown("---")
+st.markdown("### 🗑️ Delete All Records")
+
+col_delete = st.columns([1, 1, 1])
+with col_delete[1]:
+    if st.button("Delete All Records", use_container_width=True):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            st.success("✅ All records deleted successfully!")
+            st.rerun()
+
+st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
