@@ -7,23 +7,29 @@ from datetime import datetime
 st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide")
 
 # Fix: on narrow/mobile widths, Streamlit's selectbox/multiselect dropdown menus
-# truncate long option text with an ellipsis. This CSS lets the popover menu
-# options wrap onto multiple lines and expand to their full width so the
-# complete text is always visible when a field is tapped/clicked.
+# inherit the width of the (very narrow) closed field, so long option text gets
+# clipped with an ellipsis. This CSS forces the open option list to size itself
+# to its content and lets option text wrap, so the full option name is always
+# visible when a field is tapped/clicked, regardless of how narrow the field is.
 st.markdown("""
 <style>
-/* Dropdown option list (applies to selectbox & multiselect popovers) */
-div[data-baseweb="popover"] ul[role="listbox"] {
-    min-width: fit-content !important;
-    max-width: 90vw !important;
+/* The popup list that appears when you tap a selectbox/multiselect */
+ul[role="listbox"],
+div[role="listbox"] {
+    width: max-content !important;
+    min-width: 220px !important;
+    max-width: 92vw !important;
 }
-div[data-baseweb="popover"] li[role="option"] {
+/* Each option row inside that list */
+[role="option"] {
+    width: auto !important;
     white-space: normal !important;
     overflow: visible !important;
     text-overflow: unset !important;
     word-break: break-word !important;
 }
-div[data-baseweb="popover"] li[role="option"] > div {
+/* Any inner span/div Streamlit uses to render the option label */
+[role="option"] * {
     white-space: normal !important;
     overflow: visible !important;
     text-overflow: unset !important;
@@ -380,17 +386,4 @@ if len(df) > 0:
 else:
     st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
 
-# Clear button always visible
-st.markdown("---")
-st.markdown("### 🗑️ Delete All Records")
-
-col_delete = st.columns([1, 1, 1])
-with col_delete[1]:
-    if st.button("Delete All Records", use_container_width=True):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-            st.success("✅ All records deleted successfully!")
-            st.rerun()
-
-st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>", unsafe_allow_html=True)
