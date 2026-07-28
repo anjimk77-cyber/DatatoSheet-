@@ -198,11 +198,12 @@ area_index = areas.index(st.session_state.selected_area) if st.session_state.sel
 # ---------------------------------------------------------------------------
 STARTING_ROWS = 5
 
+# The 5 issue categories are handled by real multiselect widgets below the grid
+# (st.data_editor has no native multi-select cell type), so they're not part of
+# the grid's own columns anymore.
 POND_COLUMNS = [
     "Pond Number", "Density", "DOC", "Feed/Day", "ABW",
-    "Species Culture", "Cycle Type",
-    "Diseases Issue", "Feed Issue", "Water Quality Issue",
-    "Environment Issue", "Water Color", "Management Issue",
+    "Species Culture", "Cycle Type", "Water Color",
 ]
 
 def blank_pond_df(n_rows=STARTING_ROWS):
@@ -211,8 +212,9 @@ def blank_pond_df(n_rows=STARTING_ROWS):
     )
 
 # editor_version is bumped after every successful submit to force
-# st.data_editor to reinitialize with a fresh blank grid (data_editor has
-# no built-in "clear" method, so changing its key is how you reset it).
+# st.data_editor (and the multiselect widgets below it) to reinitialize with
+# fresh blank state — this is how their keys get reset since there's no
+# built-in "clear" method.
 if 'editor_version' not in st.session_state:
     st.session_state.editor_version = 0
 if 'pond_grid_data' not in st.session_state:
@@ -237,22 +239,13 @@ with col4:
 st.markdown("#### 🐟 Pond Details")
 st.caption(
     "This is a live spreadsheet — click a cell to edit it. Species Culture, Cycle Type, "
-    "and Water Color are single-choice dropdowns — click the cell and pick one."
-)
-st.caption(
-    "🧾 **Issue columns (Diseases, Feed, Water Quality, Environment, Management) now "
-    "accept multiple selections** — click the cell and type the issues that apply, "
-    "separated by commas (e.g. `WSS, EHP`). Hover a column header to see its full list "
-    "of valid options. Anything you type that isn't on the list will be flagged when you submit."
+    "and Water Color are dropdowns — click the cell and pick one."
 )
 st.caption(
     "🗑️ **To remove a row:** hover the row → check the box on its left edge → "
     "click the trash icon that appears above the grid. "
     "➕ **To add a row:** use the blank row at the bottom of the grid."
 )
-
-def issue_help(options):
-    return "Type one or more, separated by commas. Valid options: " + ", ".join(options)
 
 edited_pond_df = st.data_editor(
     st.session_state.pond_grid_data,
@@ -272,31 +265,64 @@ edited_pond_df = st.data_editor(
         "Cycle Type": st.column_config.SelectboxColumn(
             "Cycle Type *", options=CYCLE_TYPE, width="medium", required=False
         ),
-        # NOTE: st.data_editor has no native multi-select cell type — SelectboxColumn
-        # only ever allows a single value per cell. These five columns are TextColumn
-        # instead, so a user can type several comma-separated values into one cell
-        # (e.g. "WSS, EHP"). The values are validated against the allowed lists below
-        # (find_invalid_selections) when the form is submitted.
-        "Diseases Issue": st.column_config.TextColumn(
-            "Diseases Issue", width="medium", help=issue_help(DISEASES_OPTIONS)
-        ),
-        "Feed Issue": st.column_config.TextColumn(
-            "Feed Issue", width="medium", help=issue_help(FEED_ISSUE_OPTIONS)
-        ),
-        "Water Quality Issue": st.column_config.TextColumn(
-            "Water Quality Issue", width="medium", help=issue_help(WATER_QUALITY_OPTIONS)
-        ),
-        "Environment Issue": st.column_config.TextColumn(
-            "Environment Issue", width="medium", help=issue_help(ENVIRONMENT_ISSUE_OPTIONS)
-        ),
         "Water Color": st.column_config.SelectboxColumn(
             "Water Color *", options=WATER_COLOR_OPTIONS, width="medium", required=False
         ),
-        "Management Issue": st.column_config.TextColumn(
-            "Management Issue", width="medium", help=issue_help(MANAGEMENT_ISSUE_OPTIONS)
-        ),
     },
 )
+
+def clean_text(value):
+    value = "" if pd.isna(value) else str(value).strip()
+    return "" if value.lower() == "nan" else value
+
+# Positional list (0, 1, 2, ...) so the multiselect widgets below line up
+# 1:1 with the grid rows, regardless of what index pandas assigned them.
+pond_rows = edited_pond_df.reset_index(drop=True).to_dict(orient="records")
+
+st.markdown("#### ⚠️ Issues (optional — pick as many as apply per pond)")
+st.caption(
+    "Expand a pond below and select any issues that apply. Each dropdown supports "
+    "multiple selections — click it, check off as many options as you need, and "
+    "click elsewhere to close it."
+)
+
+# One expander per grid row, each holding real (visible, clickable) multiselect
+# dropdowns for the 5 issue categories. issue_selections[i] stores the picks
+# for pond row i, matched up with rows_to_save further down by that same index.
+issue_selections = {}
+for i, row in enumerate(pond_rows):
+    pond_label = clean_text(row.get("Pond Number", "")) or f"Row {i + 1}"
+    with st.expander(f"🐟 {pond_label} — select issues"):
+        left, right = st.columns(2)
+        with left:
+            diseases = st.multiselect(
+                "Diseases Issue", DISEASES_OPTIONS,
+                key=f"diseases_{st.session_state.editor_version}_{i}",
+            )
+            feed_issue = st.multiselect(
+                "Feed Issue", FEED_ISSUE_OPTIONS,
+                key=f"feedissue_{st.session_state.editor_version}_{i}",
+            )
+            water_quality = st.multiselect(
+                "Water Quality Issue", WATER_QUALITY_OPTIONS,
+                key=f"waterquality_{st.session_state.editor_version}_{i}",
+            )
+        with right:
+            environment = st.multiselect(
+                "Environment Issue", ENVIRONMENT_ISSUE_OPTIONS,
+                key=f"environment_{st.session_state.editor_version}_{i}",
+            )
+            management = st.multiselect(
+                "Management Issue", MANAGEMENT_ISSUE_OPTIONS,
+                key=f"management_{st.session_state.editor_version}_{i}",
+            )
+    issue_selections[i] = {
+        "Diseases Issue": diseases,
+        "Feed Issue": feed_issue,
+        "Water Quality Issue": water_quality,
+        "Environment Issue": environment,
+        "Management Issue": management,
+    }
 
 # Remark
 st.markdown("#### 📝 Remark")
@@ -320,77 +346,33 @@ def to_number(value, as_int=False):
     except ValueError:
         return 0 if as_int else 0.0
 
-def clean_text(value):
-    value = "" if pd.isna(value) else str(value).strip()
-    return "" if value.lower() == "nan" else value
-
-def parse_multi(value):
-    """Split a comma-separated cell into a clean list of individual selections."""
-    value = clean_text(value)
-    if not value:
-        return []
-    return [v.strip() for v in value.split(",") if v.strip()]
-
-MULTI_ISSUE_COLUMNS = {
-    "Diseases Issue": DISEASES_OPTIONS,
-    "Feed Issue": FEED_ISSUE_OPTIONS,
-    "Water Quality Issue": WATER_QUALITY_OPTIONS,
-    "Environment Issue": ENVIRONMENT_ISSUE_OPTIONS,
-    "Management Issue": MANAGEMENT_ISSUE_OPTIONS,
-}
-
-def find_invalid_selections(rows):
-    """Check every multi-issue cell against its allowed option list (case-insensitive).
-    Returns a list of human-readable error strings, one per bad value found."""
-    errors = []
-    for row_num, r in enumerate(rows, start=1):
-        pond_label = clean_text(r.get("Pond Number", "")) or f"row {row_num}"
-        for column, allowed_options in MULTI_ISSUE_COLUMNS.items():
-            allowed_lower = {opt.lower(): opt for opt in allowed_options}
-            for selection in parse_multi(r.get(column, "")):
-                if selection.lower() not in allowed_lower:
-                    errors.append(
-                        f"Pond '{pond_label}' — **{column}**: \"{selection}\" is not a valid option"
-                    )
-    return errors
-
-def normalize_multi(value, allowed_options):
-    """Return the comma-joined, canonically-cased list of selections for a cell."""
-    allowed_lower = {opt.lower(): opt for opt in allowed_options}
-    normalized = [allowed_lower.get(v.lower(), v) for v in parse_multi(value)]
-    return ", ".join(normalized)
-
 if submitted:
-    # Keep only rows where at least pond number, density, or DOC was entered
+    # Keep only rows where at least pond number, density, or DOC was entered.
+    # Track the original positional index (i) so the right issue_selections
+    # dict lines up with the right pond.
     rows_to_save = []
-    for _, r in edited_pond_df.iterrows():
+    for i, r in enumerate(pond_rows):
         pond_number = clean_text(r.get("Pond Number", ""))
         density = clean_text(r.get("Density", ""))
         doc = clean_text(r.get("DOC", ""))
         if pond_number or density or doc:
-            rows_to_save.append(r)
-
-    invalid_selections = find_invalid_selections(rows_to_save)
+            rows_to_save.append((i, r))
 
     if not customer or not zone or not area or not technician:
         st.error("❌ Please fill in all required top-level fields (marked with *)")
     elif len(rows_to_save) == 0:
         st.error("❌ Please enter at least one pond row before submitting")
-    elif any(not clean_text(r.get("Water Color", "")) for r in rows_to_save):
+    elif any(not clean_text(r.get("Water Color", "")) for _, r in rows_to_save):
         st.error("❌ Water Color is required for every row")
-    elif any(not clean_text(r.get("Species Culture", "")) for r in rows_to_save):
+    elif any(not clean_text(r.get("Species Culture", "")) for _, r in rows_to_save):
         st.error("❌ Species Culture is required for every row")
-    elif any(not clean_text(r.get("Cycle Type", "")) for r in rows_to_save):
+    elif any(not clean_text(r.get("Cycle Type", "")) for _, r in rows_to_save):
         st.error("❌ Cycle Type is required for every row")
-    elif invalid_selections:
-        st.error("❌ Some issue columns contain values that aren't in the allowed list:")
-        for err in invalid_selections:
-            st.markdown(f"- {err}")
-        st.caption("Fix the values above (check spelling/commas) and submit again.")
     else:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_rows = []
-        for r in rows_to_save:
+        for i, r in rows_to_save:
+            picks = issue_selections.get(i, {})
             new_rows.append({
                 "Timestamp": timestamp,
                 "Customer": customer,
@@ -404,12 +386,12 @@ if submitted:
                 "DOC": to_number(r.get("DOC", ""), as_int=True),
                 "Feed Per Day": to_number(r.get("Feed/Day", "")),
                 "ABW": clean_text(r.get("ABW", "")),
-                "Diseases Issue": normalize_multi(r.get("Diseases Issue", ""), DISEASES_OPTIONS),
-                "Feed Issue": normalize_multi(r.get("Feed Issue", ""), FEED_ISSUE_OPTIONS),
-                "Water Quality Issue": normalize_multi(r.get("Water Quality Issue", ""), WATER_QUALITY_OPTIONS),
-                "Environment Issue": normalize_multi(r.get("Environment Issue", ""), ENVIRONMENT_ISSUE_OPTIONS),
+                "Diseases Issue": ", ".join(picks.get("Diseases Issue", [])),
+                "Feed Issue": ", ".join(picks.get("Feed Issue", [])),
+                "Water Quality Issue": ", ".join(picks.get("Water Quality Issue", [])),
+                "Environment Issue": ", ".join(picks.get("Environment Issue", [])),
                 "Water Color": clean_text(r.get("Water Color", "")),
-                "Management Issue": normalize_multi(r.get("Management Issue", ""), MANAGEMENT_ISSUE_OPTIONS),
+                "Management Issue": ", ".join(picks.get("Management Issue", [])),
                 "Remark": remark,
                 "Technician": technician
             })
@@ -429,7 +411,8 @@ if submitted:
         st.session_state.selected_technician = technician
 
         # Reset the pond grid back to fresh blank rows, and bump the editor
-        # version so st.data_editor reinitializes instead of keeping old edits
+        # version so st.data_editor and the multiselect widgets reinitialize
+        # instead of keeping old edits/selections
         st.session_state.pond_grid_data = blank_pond_df()
         st.session_state.editor_version += 1
 
