@@ -155,6 +155,16 @@ WATER_COLOR_OPTIONS = ["Milky Color", "Light Green", "Dark Green", "Light Yellow
 MANAGEMENT_ISSUE_OPTIONS = ["Aeration System Failure", "Water Exchange Problem", "Sludge & Bottom Soil Issue", "Chemical/Probiotic Overdose", "Predator Attack", "Other"]
 TECHNICIAN_OPTIONS = ["Mr. Vishmika", "Mr. Ashen", "Mr. Janaka", "Mr. Shashika", "Mr. Janushan"]
 
+# Columns that use MultiselectColumn in the grid (cell values come back as
+# Python lists from st.data_editor) instead of a single string.
+MULTI_ISSUE_COLUMNS = {
+    "Diseases Issue": DISEASES_OPTIONS,
+    "Feed Issue": FEED_ISSUE_OPTIONS,
+    "Water Quality Issue": WATER_QUALITY_OPTIONS,
+    "Environment Issue": ENVIRONMENT_ISSUE_OPTIONS,
+    "Management Issue": MANAGEMENT_ISSUE_OPTIONS,
+}
+
 # Load existing data
 def load_data() -> pd.DataFrame:
     ws = get_worksheet()
@@ -206,9 +216,14 @@ POND_COLUMNS = [
 ]
 
 def blank_pond_df(n_rows=STARTING_ROWS):
-    return pd.DataFrame(
-        [{col: "" for col in POND_COLUMNS} for _ in range(n_rows)]
-    )
+    # Multiselect columns need an empty list as their blank value (not ""),
+    # since st.column_config.MultiselectColumn stores/returns Python lists.
+    def blank_row():
+        return {
+            col: ([] if col in MULTI_ISSUE_COLUMNS else "")
+            for col in POND_COLUMNS
+        }
+    return pd.DataFrame([blank_row() for _ in range(n_rows)])
 
 # editor_version is bumped after every successful submit to force
 # st.data_editor to reinitialize with a fresh blank grid (data_editor has
@@ -237,7 +252,8 @@ with col4:
 st.markdown("#### 🐟 Pond Details")
 st.caption(
     "This is a live spreadsheet — click a cell to edit it. Species Culture, Cycle Type, "
-    "Water Color, and all Issue columns are dropdowns — click the cell and pick from the list."
+    "and Water Color are single-choice dropdowns. All Issue columns are multi-select "
+    "dropdowns — click the cell and check off as many options as apply."
 )
 st.caption(
     "🗑️ **To remove a row:** hover the row → check the box on its left edge → "
@@ -263,23 +279,23 @@ edited_pond_df = st.data_editor(
         "Cycle Type": st.column_config.SelectboxColumn(
             "Cycle Type *", options=CYCLE_TYPE, width="medium", required=False
         ),
-        "Diseases Issue": st.column_config.SelectboxColumn(
-            "Diseases Issue", options=DISEASES_OPTIONS, width="medium", required=False
+        "Diseases Issue": st.column_config.MultiselectColumn(
+            "Diseases Issue", options=DISEASES_OPTIONS, width="medium"
         ),
-        "Feed Issue": st.column_config.SelectboxColumn(
-            "Feed Issue", options=FEED_ISSUE_OPTIONS, width="medium", required=False
+        "Feed Issue": st.column_config.MultiselectColumn(
+            "Feed Issue", options=FEED_ISSUE_OPTIONS, width="medium"
         ),
-        "Water Quality Issue": st.column_config.SelectboxColumn(
-            "Water Quality Issue", options=WATER_QUALITY_OPTIONS, width="medium", required=False
+        "Water Quality Issue": st.column_config.MultiselectColumn(
+            "Water Quality Issue", options=WATER_QUALITY_OPTIONS, width="medium"
         ),
-        "Environment Issue": st.column_config.SelectboxColumn(
-            "Environment Issue", options=ENVIRONMENT_ISSUE_OPTIONS, width="medium", required=False
+        "Environment Issue": st.column_config.MultiselectColumn(
+            "Environment Issue", options=ENVIRONMENT_ISSUE_OPTIONS, width="medium"
         ),
         "Water Color": st.column_config.SelectboxColumn(
             "Water Color *", options=WATER_COLOR_OPTIONS, width="medium", required=False
         ),
-        "Management Issue": st.column_config.SelectboxColumn(
-            "Management Issue", options=MANAGEMENT_ISSUE_OPTIONS, width="medium", required=False
+        "Management Issue": st.column_config.MultiselectColumn(
+            "Management Issue", options=MANAGEMENT_ISSUE_OPTIONS, width="medium"
         ),
     },
 )
@@ -311,19 +327,22 @@ def clean_text(value):
     return "" if value.lower() == "nan" else value
 
 def parse_multi(value):
-    """Split a comma-separated cell into a clean list of individual selections."""
+    """Normalize a multi-issue cell into a clean list of individual selections.
+    st.column_config.MultiselectColumn returns a Python list; older/blank cells
+    or a manually-typed comma string are also handled for safety."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if value is None:
+        return []
+    try:
+        if pd.isna(value):
+            return []
+    except (TypeError, ValueError):
+        pass
     value = clean_text(value)
     if not value:
         return []
     return [v.strip() for v in value.split(",") if v.strip()]
-
-MULTI_ISSUE_COLUMNS = {
-    "Diseases Issue": DISEASES_OPTIONS,
-    "Feed Issue": FEED_ISSUE_OPTIONS,
-    "Water Quality Issue": WATER_QUALITY_OPTIONS,
-    "Environment Issue": ENVIRONMENT_ISSUE_OPTIONS,
-    "Management Issue": MANAGEMENT_ISSUE_OPTIONS,
-}
 
 def find_invalid_selections(rows):
     """Check every multi-issue cell against its allowed option list.
