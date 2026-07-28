@@ -237,13 +237,24 @@ with col4:
 st.markdown("#### 🐟 Pond Details")
 st.caption(
     "This is a live spreadsheet — click a cell to edit it. Species Culture, Cycle Type, "
-    "Water Color, and all Issue columns are dropdowns — click the cell and pick from the list."
+    "and Water Color are single-choice dropdowns. For Diseases/Feed/Water Quality/"
+    "Environment/Management Issue, type one or more values separated by commas "
+    "(e.g. `WSS, GROWTH ISSUE`) — see the valid options below."
 )
 st.caption(
     "🗑️ **To remove a row:** hover the row → check the box on its left edge → "
     "click the trash icon that appears above the grid. "
     "➕ **To add a row:** use the blank row at the bottom of the grid."
 )
+
+with st.expander("ℹ️ Valid options for multi-issue columns"):
+    st.markdown(f"""
+- **Diseases Issue**: {", ".join(DISEASES_OPTIONS)}
+- **Feed Issue**: {", ".join(FEED_ISSUE_OPTIONS)}
+- **Water Quality Issue**: {", ".join(WATER_QUALITY_OPTIONS)}
+- **Environment Issue**: {", ".join(ENVIRONMENT_ISSUE_OPTIONS)}
+- **Management Issue**: {", ".join(MANAGEMENT_ISSUE_OPTIONS)}
+""")
 
 edited_pond_df = st.data_editor(
     st.session_state.pond_grid_data,
@@ -263,24 +274,14 @@ edited_pond_df = st.data_editor(
         "Cycle Type": st.column_config.SelectboxColumn(
             "Cycle Type *", options=CYCLE_TYPE, width="medium", required=False
         ),
-        "Diseases Issue": st.column_config.SelectboxColumn(
-            "Diseases Issue", options=DISEASES_OPTIONS, width="medium", required=False
-        ),
-        "Feed Issue": st.column_config.SelectboxColumn(
-            "Feed Issue", options=FEED_ISSUE_OPTIONS, width="medium", required=False
-        ),
-        "Water Quality Issue": st.column_config.SelectboxColumn(
-            "Water Quality Issue", options=WATER_QUALITY_OPTIONS, width="medium", required=False
-        ),
-        "Environment Issue": st.column_config.SelectboxColumn(
-            "Environment Issue", options=ENVIRONMENT_ISSUE_OPTIONS, width="medium", required=False
-        ),
+        "Diseases Issue": st.column_config.TextColumn("Diseases Issue", width="large"),
+        "Feed Issue": st.column_config.TextColumn("Feed Issue", width="medium"),
+        "Water Quality Issue": st.column_config.TextColumn("Water Quality Issue", width="large"),
+        "Environment Issue": st.column_config.TextColumn("Environment Issue", width="medium"),
         "Water Color": st.column_config.SelectboxColumn(
             "Water Color *", options=WATER_COLOR_OPTIONS, width="medium", required=False
         ),
-        "Management Issue": st.column_config.SelectboxColumn(
-            "Management Issue", options=MANAGEMENT_ISSUE_OPTIONS, width="medium", required=False
-        ),
+        "Management Issue": st.column_config.TextColumn("Management Issue", width="large"),
     },
 )
 
