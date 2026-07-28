@@ -237,9 +237,13 @@ with col4:
 st.markdown("#### 🐟 Pond Details")
 st.caption(
     "This is a live spreadsheet — click a cell to edit it. Species Culture, Cycle Type, "
-    "and Water Color are single-choice dropdowns. For Diseases/Feed/Water Quality/"
-    "Environment/Management Issue, type one or more values separated by commas "
-    "(e.g. `WSS, GROWTH ISSUE`) — see the valid options below."
+    "and Water Color are single-choice dropdowns — click the cell and pick one."
+)
+st.caption(
+    "🧾 **Issue columns (Diseases, Feed, Water Quality, Environment, Management) now "
+    "accept multiple selections** — click the cell and type the issues that apply, "
+    "separated by commas (e.g. `WSS, EHP`). Hover a column header to see its full list "
+    "of valid options. Anything you type that isn't on the list will be flagged when you submit."
 )
 st.caption(
     "🗑️ **To remove a row:** hover the row → check the box on its left edge → "
@@ -247,14 +251,8 @@ st.caption(
     "➕ **To add a row:** use the blank row at the bottom of the grid."
 )
 
-with st.expander("ℹ️ Valid options for multi-issue columns"):
-    st.markdown(f"""
-- **Diseases Issue**: {", ".join(DISEASES_OPTIONS)}
-- **Feed Issue**: {", ".join(FEED_ISSUE_OPTIONS)}
-- **Water Quality Issue**: {", ".join(WATER_QUALITY_OPTIONS)}
-- **Environment Issue**: {", ".join(ENVIRONMENT_ISSUE_OPTIONS)}
-- **Management Issue**: {", ".join(MANAGEMENT_ISSUE_OPTIONS)}
-""")
+def issue_help(options):
+    return "Type one or more, separated by commas. Valid options: " + ", ".join(options)
 
 edited_pond_df = st.data_editor(
     st.session_state.pond_grid_data,
@@ -274,14 +272,29 @@ edited_pond_df = st.data_editor(
         "Cycle Type": st.column_config.SelectboxColumn(
             "Cycle Type *", options=CYCLE_TYPE, width="medium", required=False
         ),
-        "Diseases Issue": st.column_config.TextColumn("Diseases Issue", width="large"),
-        "Feed Issue": st.column_config.TextColumn("Feed Issue", width="medium"),
-        "Water Quality Issue": st.column_config.TextColumn("Water Quality Issue", width="large"),
-        "Environment Issue": st.column_config.TextColumn("Environment Issue", width="medium"),
+        # NOTE: st.data_editor has no native multi-select cell type — SelectboxColumn
+        # only ever allows a single value per cell. These five columns are TextColumn
+        # instead, so a user can type several comma-separated values into one cell
+        # (e.g. "WSS, EHP"). The values are validated against the allowed lists below
+        # (find_invalid_selections) when the form is submitted.
+        "Diseases Issue": st.column_config.TextColumn(
+            "Diseases Issue", width="medium", help=issue_help(DISEASES_OPTIONS)
+        ),
+        "Feed Issue": st.column_config.TextColumn(
+            "Feed Issue", width="medium", help=issue_help(FEED_ISSUE_OPTIONS)
+        ),
+        "Water Quality Issue": st.column_config.TextColumn(
+            "Water Quality Issue", width="medium", help=issue_help(WATER_QUALITY_OPTIONS)
+        ),
+        "Environment Issue": st.column_config.TextColumn(
+            "Environment Issue", width="medium", help=issue_help(ENVIRONMENT_ISSUE_OPTIONS)
+        ),
         "Water Color": st.column_config.SelectboxColumn(
             "Water Color *", options=WATER_COLOR_OPTIONS, width="medium", required=False
         ),
-        "Management Issue": st.column_config.TextColumn("Management Issue", width="large"),
+        "Management Issue": st.column_config.TextColumn(
+            "Management Issue", width="medium", help=issue_help(MANAGEMENT_ISSUE_OPTIONS)
+        ),
     },
 )
 
@@ -327,18 +340,25 @@ MULTI_ISSUE_COLUMNS = {
 }
 
 def find_invalid_selections(rows):
-    """Check every multi-issue cell against its allowed option list.
+    """Check every multi-issue cell against its allowed option list (case-insensitive).
     Returns a list of human-readable error strings, one per bad value found."""
     errors = []
     for row_num, r in enumerate(rows, start=1):
         pond_label = clean_text(r.get("Pond Number", "")) or f"row {row_num}"
         for column, allowed_options in MULTI_ISSUE_COLUMNS.items():
+            allowed_lower = {opt.lower(): opt for opt in allowed_options}
             for selection in parse_multi(r.get(column, "")):
-                if selection not in allowed_options:
+                if selection.lower() not in allowed_lower:
                     errors.append(
                         f"Pond '{pond_label}' — **{column}**: \"{selection}\" is not a valid option"
                     )
     return errors
+
+def normalize_multi(value, allowed_options):
+    """Return the comma-joined, canonically-cased list of selections for a cell."""
+    allowed_lower = {opt.lower(): opt for opt in allowed_options}
+    normalized = [allowed_lower.get(v.lower(), v) for v in parse_multi(value)]
+    return ", ".join(normalized)
 
 if submitted:
     # Keep only rows where at least pond number, density, or DOC was entered
@@ -350,6 +370,8 @@ if submitted:
         if pond_number or density or doc:
             rows_to_save.append(r)
 
+    invalid_selections = find_invalid_selections(rows_to_save)
+
     if not customer or not zone or not area or not technician:
         st.error("❌ Please fill in all required top-level fields (marked with *)")
     elif len(rows_to_save) == 0:
@@ -360,10 +382,11 @@ if submitted:
         st.error("❌ Species Culture is required for every row")
     elif any(not clean_text(r.get("Cycle Type", "")) for r in rows_to_save):
         st.error("❌ Cycle Type is required for every row")
-    elif find_invalid_selections(rows_to_save):
+    elif invalid_selections:
         st.error("❌ Some issue columns contain values that aren't in the allowed list:")
-        for err in find_invalid_selections(rows_to_save):
+        for err in invalid_selections:
             st.markdown(f"- {err}")
+        st.caption("Fix the values above (check spelling/commas) and submit again.")
     else:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_rows = []
@@ -381,12 +404,12 @@ if submitted:
                 "DOC": to_number(r.get("DOC", ""), as_int=True),
                 "Feed Per Day": to_number(r.get("Feed/Day", "")),
                 "ABW": clean_text(r.get("ABW", "")),
-                "Diseases Issue": ", ".join(parse_multi(r.get("Diseases Issue", ""))),
-                "Feed Issue": ", ".join(parse_multi(r.get("Feed Issue", ""))),
-                "Water Quality Issue": ", ".join(parse_multi(r.get("Water Quality Issue", ""))),
-                "Environment Issue": ", ".join(parse_multi(r.get("Environment Issue", ""))),
+                "Diseases Issue": normalize_multi(r.get("Diseases Issue", ""), DISEASES_OPTIONS),
+                "Feed Issue": normalize_multi(r.get("Feed Issue", ""), FEED_ISSUE_OPTIONS),
+                "Water Quality Issue": normalize_multi(r.get("Water Quality Issue", ""), WATER_QUALITY_OPTIONS),
+                "Environment Issue": normalize_multi(r.get("Environment Issue", ""), ENVIRONMENT_ISSUE_OPTIONS),
                 "Water Color": clean_text(r.get("Water Color", "")),
-                "Management Issue": ", ".join(parse_multi(r.get("Management Issue", ""))),
+                "Management Issue": normalize_multi(r.get("Management Issue", ""), MANAGEMENT_ISSUE_OPTIONS),
                 "Remark": remark,
                 "Technician": technician
             })
