@@ -5,7 +5,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 # Configure page
-st.set_page_config(page_title="Water Quality Report - Data Collection", page_icon="KMN-Aqua-logo-white.png", layout="wide")
+st.set_page_config(page_title="Water Quality Report - Data Collection", page_icon="pngtree-blue-water-drops-png-image_17736037.png", layout="wide")
 
 # Fix: on narrow/mobile widths, Streamlit's selectbox/multiselect dropdown menus
 # inherit the width of the (very narrow) closed field, so long option text gets
