@@ -292,7 +292,7 @@ edited_pond_df = st.data_editor(
             "Environment Issue", options=ENVIRONMENT_ISSUE_OPTIONS, width="medium"
         ),
         "Water Color": st.column_config.SelectboxColumn(
-            "Water Color *", options=WATER_COLOR_OPTIONS, width="medium", required=False
+            "Water Color", options=WATER_COLOR_OPTIONS, width="medium", required=False
         ),
         "Management Issue": st.column_config.MultiselectColumn(
             "Management Issue", options=MANAGEMENT_ISSUE_OPTIONS, width="medium"
@@ -372,8 +372,6 @@ if submitted:
         st.error("❌ Please fill in all required top-level fields (marked with *)")
     elif len(rows_to_save) == 0:
         st.error("❌ Please enter at least one pond row before submitting")
-    elif any(not clean_text(r.get("Water Color", "")) for r in rows_to_save):
-        st.error("❌ Water Color is required for every row")
     elif any(not clean_text(r.get("Species Culture", "")) for r in rows_to_save):
         st.error("❌ Species Culture is required for every row")
     elif any(not clean_text(r.get("Cycle Type", "")) for r in rows_to_save):
