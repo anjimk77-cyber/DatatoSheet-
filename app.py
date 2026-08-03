@@ -457,22 +457,35 @@ if pond_number:
     if original_row_count == 0:
         st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
 
-    editor_df = df_pond_hist_display.copy()
-    if len(editor_df) > 0:
-        # IMPORTANT: ".dt.date" turns unparseable/blank dates into NaT (a
-        # Timestamp-flavored missing marker), which mixed with real
-        # datetime.date objects in the same object-dtype column makes
-        # Streamlit's data_editor type-check reject the DateColumn config.
-        # Explicitly collapse those NaT cells down to plain None instead.
-        _raw_dates = pd.to_datetime(editor_df["Date"], errors="coerce")
-        editor_df["Date"] = _raw_dates.dt.date
-        editor_df.loc[_raw_dates.isna(), "Date"] = None
-        for numcol in ["DOC", "Density", "Feed Per Day"]:
-            editor_df[numcol] = pd.to_numeric(editor_df[numcol], errors="coerce")
+    _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
+                  "Issues", "Water Color", "Grade", "Remark"]
+    _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
+
+    def _normalize_pond_dtypes(df):
+        """Force every column to one single, unambiguous dtype every time
+        the table is built or edited: Date -> real datetime64 (never a
+        Python object mix of date/None/NaT), numeric columns -> float64,
+        everything else -> plain str. Streamlit's data_editor rejects a
+        column whose dtype isn't uniformly compatible with its configured
+        widget type (e.g. DateColumn requires an actual date/datetime
+        dtype — not object, not string), so this runs on every rebuild to
+        guarantee that's always true regardless of what came out of the
+        Google Sheet or what the editor produced on the previous rerun."""
+        df = df.copy()
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        for numcol in _NUM_COLS:
+            if numcol in df.columns:
+                df[numcol] = pd.to_numeric(df[numcol], errors="coerce")
+        for c in _TEXT_COLS:
+            if c in df.columns:
+                df[c] = df[c].fillna("").astype(str)
+        return df
+
+    if len(df_pond_hist_display) > 0:
+        editor_df = _normalize_pond_dtypes(df_pond_hist_display)
     else:
-        # Build the empty frame with real per-column dtypes — NumberColumn /
-        # DateColumn configs below require actual numeric/date dtypes, not
-        # generic "object", or Streamlit's newer type-checker rejects them.
+        # Build an explicitly-typed empty frame (0 rows) so every column
+        # already has the right dtype before normalization ever touches it.
         _empty_dtypes = {
             "Timestamp": "object", "Date": "object",
             "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
@@ -481,12 +494,11 @@ if pond_number:
             "Remark": "object",
         }
         editor_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in display_cols})
+        editor_df = _normalize_pond_dtypes(editor_df)
 
-    if "Status" not in editor_df.columns:
-
-        editor_df["Status"] = editor_df["Timestamp"].apply(
-            lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
-        )
+    editor_df["Status"] = editor_df["Timestamp"].apply(
+        lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
+    )
 
     column_config = {
         "Date": st.column_config.DateColumn("Date *", required=True),
@@ -514,8 +526,15 @@ if pond_number:
     working_sig_key = f"__pond_working_sig_{widget_scope}"
 
     def _parse_cell_date(val):
-        if val is None or val == "":
+        if val is None:
             return None
+        try:
+            if pd.isna(val):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if isinstance(val, pd.Timestamp):
+            return val.date()
         if isinstance(val, date):
             return val
         parsed = pd.to_datetime(val, errors="coerce")
@@ -593,6 +612,7 @@ if pond_number:
             if idx < len(df):
                 df = df.drop(index=idx).reset_index(drop=True)
 
+        df = _normalize_pond_dtypes(df)
         df = _recompute_docs(df, prev_date, prev_doc)
         df = _recompute_status(df)
 
@@ -630,11 +650,8 @@ if pond_number:
             row_label = f"Row {i + 1}"
 
             # --- Date ---
-            row_date = row.get("Date")
-            if isinstance(row_date, str) and row_date.strip():
-                parsed = pd.to_datetime(row_date, errors="coerce")
-                row_date = parsed.date() if pd.notna(parsed) else None
-            if row_date is None or (isinstance(row_date, float) and pd.isna(row_date)):
+            row_date = _parse_cell_date(row.get("Date"))
+            if row_date is None:
                 errors.append(f"{row_label}: Date is required")
                 continue
 
