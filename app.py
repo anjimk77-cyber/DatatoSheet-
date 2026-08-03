@@ -119,10 +119,10 @@ MANAGEMENT_ISSUE_OPTIONS = ["Aeration System Failure", "Water Exchange Problem",
                              "Sludge & Bottom Soil Issue", "Chemical/Probiotic Overdose",
                              "Predator Attack", "Other"]
 
-# All issue categories combined. Inside the spreadsheet editor each cell can
-# only hold a single selection (a data_editor limitation), so this is used
-# as a single-select dropdown in the Issues column, same as the reference
-# spreadsheet layout.
+# All issue categories combined, used by the multi-select "Issues" picker
+# below the pond spreadsheet. A data_editor cell can't hold a true
+# multi-select widget, so multiple picks get joined with ISSUES_SEP and
+# written into the row's Issues cell as one combined string.
 ISSUES_OPTIONS = (
     [f"Disease: {x}" for x in DISEASES_OPTIONS] +
     [f"Feed: {x}" for x in FEED_ISSUE_OPTIONS] +
@@ -137,6 +137,7 @@ COLUMN_ORDER = [
     "Pond Number", "Date", "Species Culture", "Cycle Type",
     "DOC", "Density", "Feed Per Day", "ABW",
     "Issues", "Water Color", "Grade", "Remark", "Technician",
+    "Deleted",
 ]
 
 # Columns shown/edited in the pond spreadsheet (the rest — Customer, Farm,
@@ -189,8 +190,28 @@ def bump_data_version():
     _load_data_cached.clear()
 
 def load_data():
+    """Returns the sheet's data with any soft-deleted rows filtered out. The
+    rows themselves are never removed from the Google Sheet — the Deleted
+    column just flags them, so this is the single place that hides them
+    from the rest of the app (pond dropdown, history table, full export)."""
     sheet_id = st.secrets["gsheet"]["sheet_id"]
-    return _load_data_cached(st.session_state.get("_data_version", 0), sheet_id)
+    df = _load_data_cached(st.session_state.get("_data_version", 0), sheet_id)
+    if "Deleted" in df.columns:
+        is_deleted = df["Deleted"].astype(str).str.strip().str.lower().isin(["yes", "true", "1"])
+        df = df[~is_deleted].reset_index(drop=True)
+    return df
+
+def mark_deleted_by_timestamp(timestamp):
+    """Soft-delete: flag the row as Deleted='Yes' in the Google Sheet. The
+    row and all its data stay in the sheet permanently for audit purposes —
+    it just gets hidden from the app (see load_data above) so it disappears
+    from the screen and never reappears, even after a refresh."""
+    ws = get_worksheet()
+    cell = ws.find(str(timestamp), in_column=1)
+    if cell:
+        deleted_col_index = COLUMN_ORDER.index("Deleted") + 1
+        ws.update_cell(cell.row, deleted_col_index, "Yes")
+        bump_data_version()
 
 def append_record(record):
     ws = get_worksheet()
@@ -469,8 +490,11 @@ if pond_number:
         lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
     )
 
-    st.caption("Rows marked **✅ Saved** are already in the Google Sheet and are locked — "
-               "add new rows at the bottom (they'll show **🆕 New (unsaved)**) and click Save.")
+    st.caption("Rows marked **✅ Saved** are already in the Google Sheet — their fields can't be "
+               "edited here, but you can delete one (🗑️ row menu) and it will disappear from this "
+               "screen for good, even after a refresh. The underlying data stays in the Google Sheet "
+               "(it's flagged, not erased). Add new rows at the bottom (**🆕 New (unsaved)**) and "
+               "click Save to write them.")
 
     column_config = {
         "Date": st.column_config.DateColumn("Date *", required=True),
@@ -482,7 +506,9 @@ if pond_number:
                                                               required=True, default=default_species),
         "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
                                                          required=True, default=default_cycle),
-        "Issues": st.column_config.SelectboxColumn("Issues", options=["(none)"] + ISSUES_OPTIONS, required=False),
+        "Issues": st.column_config.TextColumn(
+            "Issues", help="Use the multi-select picker below the table to fill this in, "
+                           "or type issues yourself separated by '; '"),
         "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
         "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
         "Remark": st.column_config.TextColumn("Remark"),
@@ -593,8 +619,12 @@ if pond_number:
 
         for idx in sorted(state.get("deleted_rows", []), reverse=True):
             if idx < len(df):
-                if str(df.at[idx, "Timestamp"]).strip():
-                    continue  # locked: can't delete an already-saved row here
+                ts = str(df.at[idx, "Timestamp"]).strip()
+                if ts:
+                    # Already-saved row: soft-delete in the Google Sheet
+                    # (flags it, keeps the underlying data), then remove it
+                    # from the screen — it will stay gone after a refresh.
+                    mark_deleted_by_timestamp(ts)
                 df = df.drop(index=idx).reset_index(drop=True)
 
         df = _normalize_pond_dtypes(df)
@@ -614,6 +644,26 @@ if pond_number:
         key=editor_key,
         on_change=apply_editor_changes,
     )
+
+    # ---- Multi-select Issues picker: lets you tick several issues at once
+    # and apply them (joined together) to a chosen NEW row's Issues cell.
+    _current_table = st.session_state[working_key].reset_index(drop=True)
+    _new_row_idx = [i for i in _current_table.index if str(_current_table.at[i, "Timestamp"]).strip() == ""]
+    if _new_row_idx:
+        with st.expander("🏷️ Pick multiple issues for a row", expanded=False):
+            _row_labels = [f"Row {i + 1} — {_current_table.at[i, 'Date']}" for i in _new_row_idx]
+            pick_col1, pick_col2 = st.columns([1, 2])
+            with pick_col1:
+                picked_label = st.selectbox("Apply to", _row_labels, key=f"issue_row_pick_{widget_scope}")
+            with pick_col2:
+                picked_issues = st.multiselect("Issues (select one or more)", ISSUES_OPTIONS,
+                                                key=f"issue_multi_pick_{widget_scope}")
+            if st.button("Apply issues to this row", key=f"apply_issues_{widget_scope}"):
+                picked_idx = _new_row_idx[_row_labels.index(picked_label)]
+                st.session_state[working_key].at[picked_idx, "Issues"] = ISSUES_SEP.join(picked_issues)
+                st.rerun()
+    else:
+        st.caption("Add a new row in the table above, then you can multi-select its issues here.")
 
     save_clicked = st.button("💾 Save New Records", use_container_width=True,
                               type="primary", key=f"save_{widget_scope}")
