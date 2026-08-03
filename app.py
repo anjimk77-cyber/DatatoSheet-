@@ -223,32 +223,6 @@ def delete_record_by_timestamp(timestamp):
         ws.delete_rows(cell.row)
         bump_data_version()
 
-def delete_all_pond_records(customer, farm, pond_number):
-    """Delete every saved row for this customer+farm+pond (used right before
-    re-writing that pond's whole spreadsheet in one shot on Save)."""
-    ws = get_worksheet()
-    all_values = ws.get_all_values()
-    if not all_values:
-        return
-    header = all_values[0]
-    try:
-        idx_customer = header.index("Customer")
-        idx_farm = header.index("Farm Name with Code")
-        idx_pond = header.index("Pond Number")
-    except ValueError:
-        return
-    rows_to_delete = []
-    for i, row in enumerate(all_values[1:], start=2):
-        row = row + [""] * (len(header) - len(row))
-        if (row[idx_customer] == customer
-                and row[idx_farm] == farm
-                and row[idx_pond] == pond_number):
-            rows_to_delete.append(i)
-    for r in sorted(rows_to_delete, reverse=True):
-        ws.delete_rows(r)
-    if rows_to_delete:
-        bump_data_version()
-
 def to_number(value, as_int=False):
     value = str(value).strip()
     if value == "" or value.lower() == "nan":
@@ -386,7 +360,8 @@ with col4:
 technician = st.selectbox("Technician *", TECHNICIAN_OPTIONS, key="technician_select")
 
 # =========================================================================
-# STEP 4: POND DETAILS — pond selection bar, then a spreadsheet
+# STEP 4: POND DETAILS — pond selection bar, saved (read-only) history,
+# then a small spreadsheet for adding new records
 # =========================================================================
 st.markdown("---")
 st.markdown("#### 🐟 Pond Details")
@@ -413,6 +388,8 @@ widget_scope = f"{farm}_{selected_pond_choice}"
 
 # =========================================================================
 # LOAD THIS POND'S HISTORY FROM THE GOOGLE SHEET
+# (this always reflects only the selected customer + farm + pond; switching
+# ponds never touches any other pond's saved data)
 # =========================================================================
 df_pond_hist_full = load_data()
 required_cols = {"Customer", "Farm Name with Code", "Pond Number"}
@@ -445,32 +422,34 @@ default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else CYCLE_TYPE[0]
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
 if pond_number:
-    # "Timestamp" is kept as a hidden internal column so we know which rows
-    # already exist in the sheet (Saved) vs. which were just added in this
-    # session (New / unsaved) — that's what drives the Status column below.
-    display_cols = ["Timestamp"] + POND_COLS
-    existing_pond_cols = [c for c in display_cols if c in df_pond_hist_full.columns]
+    existing_pond_cols = [c for c in POND_COLS if c in df_pond_hist_full.columns]
     df_pond_hist_display = df_pond_hist_full[existing_pond_cols].copy() if len(df_pond_hist_full) > 0 \
-        else pd.DataFrame(columns=display_cols)
+        else pd.DataFrame(columns=POND_COLS)
     original_row_count = len(df_pond_hist_display)
 
+    # ---- Saved records: shown as a read-only table, always marked "Saved".
+    # This is exactly what was previously entered for THIS pond only — it
+    # never changes when you look at other ponds/farms, and it can't be
+    # edited here anymore (edit directly in the Google Sheet if a
+    # correction is ever needed).
     if original_row_count == 0:
-        st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
+        st.info(f"No history yet for Pond {pond_number}. Add its first record below.")
+    else:
+        saved_view = df_pond_hist_display.copy()
+        saved_view["Status"] = "✅ Saved"
+        st.caption("Saved records (read-only):")
+        st.dataframe(saved_view, use_container_width=True,
+                     height=min(360, 60 + 36 * len(saved_view)))
 
-    _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
-                  "Issues", "Water Color", "Grade", "Remark"]
+    # ---- Add new record(s) for this pond: a small, always-fresh editor.
+    # Rows entered here are new/unsaved until "Save" is clicked; nothing
+    # already saved above can be changed from this editor.
+    st.caption("➕ Add new record(s) below, then Save:")
+
+    _TEXT_COLS = ["ABW", "Species Culture", "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
     _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
 
-    def _normalize_pond_dtypes(df):
-        """Force every column to one single, unambiguous dtype every time
-        the table is built or edited: Date -> real datetime64 (never a
-        Python object mix of date/None/NaT), numeric columns -> float64,
-        everything else -> plain str. Streamlit's data_editor rejects a
-        column whose dtype isn't uniformly compatible with its configured
-        widget type (e.g. DateColumn requires an actual date/datetime
-        dtype — not object, not string), so this runs on every rebuild to
-        guarantee that's always true regardless of what came out of the
-        Google Sheet or what the editor produced on the previous rerun."""
+    def _normalize_new_dtypes(df):
         df = df.copy()
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         for numcol in _NUM_COLS:
@@ -481,24 +460,15 @@ if pond_number:
                 df[c] = df[c].fillna("").astype(str)
         return df
 
-    if len(df_pond_hist_display) > 0:
-        editor_df = _normalize_pond_dtypes(df_pond_hist_display)
-    else:
-        # Build an explicitly-typed empty frame (0 rows) so every column
-        # already has the right dtype before normalization ever touches it.
-        _empty_dtypes = {
-            "Timestamp": "object", "Date": "object",
-            "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
-            "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
-            "Issues": "object", "Water Color": "object", "Grade": "object",
-            "Remark": "object",
-        }
-        editor_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in display_cols})
-        editor_df = _normalize_pond_dtypes(editor_df)
-
-    editor_df["Status"] = editor_df["Timestamp"].apply(
-        lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
-    )
+    _empty_dtypes = {
+        "Date": "object",
+        "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
+        "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
+        "Issues": "object", "Water Color": "object", "Grade": "object",
+        "Remark": "object",
+    }
+    empty_new_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in POND_COLS})
+    empty_new_df = _normalize_new_dtypes(empty_new_df)
 
     column_config = {
         "Date": st.column_config.DateColumn("Date *", required=True),
@@ -514,16 +484,12 @@ if pond_number:
         "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
         "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
         "Remark": st.column_config.TextColumn("Remark"),
-        "Status": st.column_config.TextColumn("Status", disabled=True),
     }
-    # "Timestamp" is deliberately left out of column_order so it stays in
-    # the underlying data (for matching rows back to sheet rows) without
-    # being shown or editable — "Status" is shown last instead.
-    column_order = POND_COLS + ["Status"]
+    column_order = POND_COLS
 
-    editor_key = f"editor_{widget_scope}"
-    working_key = f"__pond_working_{widget_scope}"
-    working_sig_key = f"__pond_working_sig_{widget_scope}"
+    editor_key = f"editor_new_{widget_scope}"
+    working_key = f"__pond_new_working_{widget_scope}"
+    working_sig_key = f"__pond_new_sig_{widget_scope}"
 
     def _parse_cell_date(val):
         if val is None:
@@ -545,7 +511,8 @@ if pond_number:
 
     def _recompute_docs(df, seed_date, seed_doc):
         """Return a copy of df with every blank DOC cell filled in, in row
-        order, using (previous row's DOC + days since previous row's Date)."""
+        order, using (previous row's DOC + days since previous row's Date).
+        seed_date/seed_doc come from the pond's latest SAVED record."""
         df = df.reset_index(drop=True).copy()
         run_date, run_doc = seed_date, seed_doc
         for i in range(len(df)):
@@ -560,37 +527,31 @@ if pond_number:
                     except Exception:
                         pass
                 continue
-            if i == 0 and not _doc_is_blank(df.at[i, "DOC"]):
-                run_doc = int(df.at[i, "DOC"])
-                run_date = row_date
-                continue
             computed = int(run_doc) + (row_date - run_date).days
-            df.at[i, "DOC"] = computed
-            run_doc = computed
+            if _doc_is_blank(df.at[i, "DOC"]):
+                df.at[i, "DOC"] = computed
+            else:
+                try:
+                    run_doc = int(df.at[i, "DOC"])
+                    run_date = row_date
+                    continue
+                except Exception:
+                    df.at[i, "DOC"] = computed
+            run_doc = df.at[i, "DOC"]
             run_date = row_date
         return df
 
-    def _recompute_status(df):
-        df = df.copy()
-        df["Status"] = df["Timestamp"].apply(
-            lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
-        )
-        return df
-
-    # Keep our own persistent copy of the table (separate from the widget's
-    # internal state). Re-seed it whenever we switch pond/farm/customer or
-    # right after a save changes the saved history.
+    # Re-seed the "new records" working table whenever we switch pond/farm/
+    # customer, or right after a save changes the saved history — it always
+    # starts empty, since it only ever holds brand-new, not-yet-saved rows.
     base_signature = (customer, farm, pond_number, original_row_count)
     if st.session_state.get(working_sig_key) != base_signature:
-        st.session_state[working_key] = editor_df.copy()
+        st.session_state[working_key] = empty_new_df.copy()
         st.session_state[working_sig_key] = base_signature
         if editor_key in st.session_state:
             del st.session_state[editor_key]
 
     def apply_editor_changes():
-        """on_change callback: fold whatever was just typed into our working
-        copy, recompute DOC + Status, then delete the widget's own delta
-        state so Streamlit redraws the table fresh from our updated copy."""
         state = st.session_state.get(editor_key)
         if not state:
             return
@@ -605,16 +566,14 @@ if pond_number:
 
         for new_row in state.get("added_rows", []):
             row = {c: new_row.get(c) for c in df.columns}
-            row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
         for idx in sorted(state.get("deleted_rows", []), reverse=True):
             if idx < len(df):
                 df = df.drop(index=idx).reset_index(drop=True)
 
-        df = _normalize_pond_dtypes(df)
+        df = _normalize_new_dtypes(df)
         df = _recompute_docs(df, prev_date, prev_doc)
-        df = _recompute_status(df)
 
         st.session_state[working_key] = df
         del st.session_state[editor_key]
@@ -625,12 +584,12 @@ if pond_number:
         column_order=column_order,
         num_rows="dynamic",
         use_container_width=True,
-        height=320,
+        height=250,
         key=editor_key,
         on_change=apply_editor_changes,
     )
 
-    save_clicked = st.button("💾 Save Changes to Pond History", use_container_width=True,
+    save_clicked = st.button("💾 Save New Records", use_container_width=True,
                               type="primary", key=f"save_{widget_scope}")
 
     if save_clicked:
@@ -645,8 +604,11 @@ if pond_number:
         running_prev_doc = prev_doc
         now_base = datetime.now()
 
-        edited_rows = st.session_state[working_key].reset_index(drop=True)
-        for i, row in edited_rows.iterrows():
+        rows_to_save = st.session_state[working_key].reset_index(drop=True)
+        if len(rows_to_save) == 0:
+            errors.append("Add at least one new row before saving")
+
+        for i, row in rows_to_save.iterrows():
             row_label = f"Row {i + 1}"
 
             # --- Date ---
@@ -677,10 +639,7 @@ if pond_number:
             if not cycle_val_row:
                 errors.append(f"{row_label}: Cycle Type is required"); continue
 
-            # Existing rows keep their original Timestamp; new/blank rows get one now
-            row_timestamp = str(row.get("Timestamp") or "").strip()
-            if not row_timestamp:
-                row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
+            row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
 
             new_records.append({
                 "Timestamp": row_timestamp,
@@ -708,10 +667,9 @@ if pond_number:
         if errors:
             st.error("❌ " + "  \n❌ ".join(errors))
         else:
-            delete_all_pond_records(customer, farm, pond_number)
             append_records(new_records)
 
-            st.success(f"✅ Saved {len(new_records)} record(s) for Pond {pond_number}!")
+            st.success(f"✅ Saved {len(new_records)} new record(s) for Pond {pond_number}!")
             del st.session_state[working_key]
             del st.session_state[working_sig_key]
             if editor_key in st.session_state:
@@ -719,7 +677,7 @@ if pond_number:
             time.sleep(1)
             st.rerun()
 
-    # Downloads reflect the last-saved state of this pond's history
+    # Downloads reflect the currently-saved state of this pond's history
     if original_row_count > 0:
         pdl1, pdl2 = st.columns(2)
         with pdl1:
@@ -741,47 +699,11 @@ if pond_number:
             )
 
 # =========================================================================
-# HISTORY FOR THIS FARM (table — allowed to scroll horizontally)
+# FULL DATASET (all customers & farms) — kept for reference/export only
 # =========================================================================
 st.markdown("---")
-st.subheader(f"📊 Saved Pond History — {farm}")
-
-df_all = load_data()
-
-if len(df_all) > 0 and {"Customer", "Farm Name with Code"}.issubset(df_all.columns):
-    df_farm = df_all[(df_all["Customer"] == customer) & (df_all["Farm Name with Code"] == farm)]
-    existing_cols = [c for c in COLUMN_ORDER if c in df_farm.columns]
-    extra_cols = [c for c in df_farm.columns if c not in COLUMN_ORDER]
-    df_farm_display = df_farm[existing_cols + extra_cols]
-
-    if len(df_farm_display) > 0:
-        st.write(f"Records for this farm: **{len(df_farm_display)}**")
-        st.dataframe(df_farm_display, use_container_width=True, height=350)
-
-        dl1, dl2 = st.columns(2)
-        with dl1:
-            csv = df_farm_display.to_csv(index=False)
-            st.download_button(
-                "📥 Download this farm's history (CSV)", data=csv,
-                file_name=f"{farm}_water_quality_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv", use_container_width=True,
-            )
-        with dl2:
-            buf = BytesIO()
-            df_farm_display.to_excel(buf, index=False, sheet_name="Pond History")
-            buf.seek(0)
-            st.download_button(
-                "📥 Download this farm's history (Excel)", data=buf,
-                file_name=f"{farm}_water_quality_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-    else:
-        st.info("ℹ️ No records saved yet for this farm.")
-else:
-    st.info("ℹ️ No data saved yet. Fill out the form above to get started!")
-
 with st.expander("📁 View / download full dataset (all customers & farms)"):
+    df_all = load_data()
     if len(df_all) > 0:
         existing_cols_all = [c for c in COLUMN_ORDER if c in df_all.columns]
         extra_cols_all = [c for c in df_all.columns if c not in COLUMN_ORDER]
