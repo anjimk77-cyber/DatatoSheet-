@@ -97,7 +97,7 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center;'>💧 Water Quality Report - Data Collection</h1>",
+st.markdown("<h1 style='text-align: center;'>Water Quality Report - Data Collection</h1>",
             unsafe_allow_html=True)
 st.subheader("KMN Aqua Services")
 st.markdown("---")
