@@ -95,7 +95,8 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💧 Water Quality Report - Data Collection")
+st.markdown("<h1 style='text-align: center;'>💧 Water Quality Report - Data Collection</h1>",
+            unsafe_allow_html=True)
 st.subheader("KMN Aqua Services")
 st.markdown("---")
 
@@ -449,17 +450,36 @@ if pond_number:
     # are already saved (non-blank Timestamp -> locked, Status = Saved) vs.
     # brand-new rows added in this session (blank Timestamp -> editable,
     # Status = New (unsaved)).
-    display_cols = ["Timestamp"] + POND_COLS
-    existing_pond_cols = [c for c in display_cols if c in df_pond_hist_full.columns]
-    df_pond_hist_display = df_pond_hist_full[existing_pond_cols].copy() if len(df_pond_hist_full) > 0 \
-        else pd.DataFrame(columns=display_cols)
+    # The Sheet stores one "Issues" cell per row (issues joined with "; "),
+    # but the spreadsheet lets you pick more than one issue via 3 slot
+    # columns (Issue 1/2/3) — so here the saved "Issues" string is split
+    # back out into those 3 slots for display/editing.
+    EDITOR_POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW", "Species Culture",
+                         "Cycle Type", "Issue 1", "Issue 2", "Issue 3", "Water Color", "Grade", "Remark"]
+    display_cols = ["Timestamp"] + EDITOR_POND_COLS
+    if len(df_pond_hist_full) > 0:
+        _src = df_pond_hist_full.copy()
+        if "Issues" in _src.columns:
+            _issue_parts = _src["Issues"].fillna("").astype(str).str.split(ISSUES_SEP, expand=True)
+        else:
+            _issue_parts = pd.DataFrame()
+        for _i in range(3):
+            _col_name = f"Issue {_i + 1}"
+            if _i in _issue_parts.columns:
+                _src[_col_name] = _issue_parts[_i].fillna("").astype(str).str.strip()
+            else:
+                _src[_col_name] = ""
+        existing_pond_cols = [c for c in display_cols if c in _src.columns]
+        df_pond_hist_display = _src[existing_pond_cols].copy()
+    else:
+        df_pond_hist_display = pd.DataFrame(columns=display_cols)
     original_row_count = len(df_pond_hist_display)
 
     if original_row_count == 0:
         st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
 
     _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
-                  "Issues", "Water Color", "Grade", "Remark"]
+                  "Issue 1", "Issue 2", "Issue 3", "Water Color", "Grade", "Remark"]
     _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
 
     def _normalize_pond_dtypes(df):
@@ -480,7 +500,8 @@ if pond_number:
             "Timestamp": "object", "Date": "object",
             "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
             "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
-            "Issues": "object", "Water Color": "object", "Grade": "object",
+            "Issue 1": "object", "Issue 2": "object", "Issue 3": "object",
+            "Water Color": "object", "Grade": "object",
             "Remark": "object",
         }
         editor_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in display_cols})
@@ -506,9 +527,9 @@ if pond_number:
                                                               required=True, default=default_species),
         "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
                                                          required=True, default=default_cycle),
-        "Issues": st.column_config.SelectboxColumn(
-            "Issues", options=ISSUES_OPTIONS, required=False,
-            help="Pick the issue for this row"),
+        "Issue 1": st.column_config.SelectboxColumn("Issue 1", options=[""] + ISSUES_OPTIONS, required=False),
+        "Issue 2": st.column_config.SelectboxColumn("Issue 2", options=[""] + ISSUES_OPTIONS, required=False),
+        "Issue 3": st.column_config.SelectboxColumn("Issue 3", options=[""] + ISSUES_OPTIONS, required=False),
         "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
         "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
         "Remark": st.column_config.TextColumn("Remark"),
@@ -517,7 +538,7 @@ if pond_number:
     # "Timestamp" is deliberately left out of column_order so it stays in
     # the underlying data (for locking rows / matching to sheet rows)
     # without being shown or editable — "Status" is shown last instead.
-    column_order = POND_COLS + ["Status"]
+    column_order = EDITOR_POND_COLS + ["Status"]
 
     editor_key = f"editor_{widget_scope}"
     working_key = f"__pond_working_{widget_scope}"
@@ -726,6 +747,11 @@ if pond_number:
             if not cycle_val_row:
                 errors.append(f"{row_label}: Cycle Type is required"); continue
 
+            # --- Combine the 3 issue slots into one "Issues" string ---
+            issues_picked = [str(row.get(c) or "").strip() for c in ("Issue 1", "Issue 2", "Issue 3")]
+            issues_picked = [x for x in issues_picked if x]
+            issues_final = ISSUES_SEP.join(dict.fromkeys(issues_picked))
+
             row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
 
             new_records.append({
@@ -742,7 +768,7 @@ if pond_number:
                 "ABW": str(row.get("ABW") or "").strip(),
                 "Species Culture": species_val_row,
                 "Cycle Type": cycle_val_row,
-                "Issues": "" if str(row.get("Issues") or "").strip() in ("", "(none)") else str(row.get("Issues")).strip(),
+                "Issues": issues_final,
                 "Water Color": water_color_val_row,
                 "Grade": grade_val_row,
                 "Remark": str(row.get("Remark") or "").strip(),
