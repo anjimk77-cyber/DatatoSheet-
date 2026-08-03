@@ -445,83 +445,61 @@ default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else CYCLE_TYPE[0]
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
 if pond_number:
-    # "Timestamp" is kept as a hidden internal column so we know which rows
-    # are already saved (non-blank Timestamp -> locked, Status = Saved) vs.
-    # brand-new rows added in this session (blank Timestamp -> editable,
-    # Status = New (unsaved)).
-    display_cols = ["Timestamp"] + POND_COLS
-    existing_pond_cols = [c for c in display_cols if c in df_pond_hist_full.columns]
-    df_pond_hist_display = df_pond_hist_full[existing_pond_cols].copy() if len(df_pond_hist_full) > 0 \
-        else pd.DataFrame(columns=display_cols)
+    # =====================================================================
+    # SAVED HISTORY — a plain, read-only table built fresh from load_data()
+    # on every run (no session caching of these values at all). This is
+    # what guarantees that any edit made directly in the Google Sheet —
+    # correcting a Density value, fixing a Grade, anything — shows up here
+    # immediately on the next load/refresh, instead of getting stuck on
+    # whatever value the app first loaded.
+    # =====================================================================
+    existing_pond_cols = [c for c in POND_COLS if c in df_pond_hist_full.columns]
+    df_pond_hist_display = df_pond_hist_full[["Timestamp"] + existing_pond_cols].copy() if len(df_pond_hist_full) > 0 \
+        else pd.DataFrame(columns=["Timestamp"] + POND_COLS)
     original_row_count = len(df_pond_hist_display)
 
     if original_row_count == 0:
         st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
-
-    _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
-                  "Issues", "Water Color", "Grade", "Remark"]
-    _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
-
-    def _normalize_pond_dtypes(df):
-        df = df.copy()
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        for numcol in _NUM_COLS:
-            if numcol in df.columns:
-                df[numcol] = pd.to_numeric(df[numcol], errors="coerce")
-        for c in _TEXT_COLS:
-            if c in df.columns:
-                df[c] = df[c].fillna("").astype(str)
-        return df
-
-    if len(df_pond_hist_display) > 0:
-        editor_df = _normalize_pond_dtypes(df_pond_hist_display)
     else:
-        _empty_dtypes = {
-            "Timestamp": "object", "Date": "object",
-            "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
-            "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
-            "Issues": "object", "Water Color": "object", "Grade": "object",
-            "Remark": "object",
-        }
-        editor_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in display_cols})
-        editor_df = _normalize_pond_dtypes(editor_df)
+        st.caption("Saved records, read live from the Google Sheet. To correct a saved value, edit it "
+                   "directly in the Sheet — it will appear here automatically. To remove a saved record, "
+                   "pick it below and delete it.")
+        st.dataframe(df_pond_hist_display[POND_COLS], use_container_width=True,
+                     height=min(360, 46 + 35 * original_row_count))
 
-    editor_df["Status"] = editor_df["Timestamp"].apply(
-        lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
-    )
+        del_options = ["-- select a saved record to delete --"] + [
+            f"{df_pond_hist_display.at[i, 'Date']}  (DOC {df_pond_hist_display.at[i, 'DOC']})"
+            for i in df_pond_hist_display.index
+        ]
+        dcol1, dcol2 = st.columns([3, 1])
+        with dcol1:
+            del_pick = st.selectbox("Delete a saved record", del_options, key=f"del_pick_{widget_scope}")
+        with dcol2:
+            st.write("")
+            if st.button("🗑️ Delete", use_container_width=True, key=f"del_btn_{widget_scope}"):
+                if del_pick != del_options[0]:
+                    pick_idx = del_options.index(del_pick) - 1
+                    ts = df_pond_hist_display.at[pick_idx, "Timestamp"]
+                    mark_deleted_by_timestamp(ts)
+                    st.rerun()
 
-    st.caption("Rows marked **✅ Saved** are already in the Google Sheet — their fields can't be "
-               "edited here, but you can delete one (🗑️ row menu) and it will disappear from this "
-               "screen for good, even after a refresh. The underlying data stays in the Google Sheet "
-               "(it's flagged, not erased). Add new rows at the bottom (**🆕 New (unsaved)**) and "
-               "click Save to write them.")
+    # =====================================================================
+    # ADD NEW RECORDS — a small blank spreadsheet. Every row here is, by
+    # definition, unsaved, so there's no locking logic needed at all.
+    # Issues get three pickable columns (Issue 1/2/3) so more than one
+    # issue can be chosen for a row, right in the spreadsheet.
+    # =====================================================================
+    st.markdown("##### ➕ Add New Records")
 
-    column_config = {
-        "Date": st.column_config.DateColumn("Date *", required=True),
-        "DOC": st.column_config.NumberColumn("DOC (auto)", help="Filled in automatically once you pick a Date — edit it to override", step=1),
-        "Density": st.column_config.NumberColumn("Density", step=1),
-        "Feed Per Day": st.column_config.NumberColumn("Feed/Day"),
-        "ABW": st.column_config.TextColumn("ABW"),
-        "Species Culture": st.column_config.SelectboxColumn("Species Culture *", options=SPECIES_CULTURE,
-                                                              required=True, default=default_species),
-        "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
-                                                         required=True, default=default_cycle),
-        "Issues": st.column_config.SelectboxColumn(
-            "Issues", options=ISSUES_OPTIONS, required=False,
-            help="Pick the issue for this row"),
-        "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
-        "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
-        "Remark": st.column_config.TextColumn("Remark"),
-        "Status": st.column_config.TextColumn("Status", disabled=True),
-    }
-    # "Timestamp" is deliberately left out of column_order so it stays in
-    # the underlying data (for locking rows / matching to sheet rows)
-    # without being shown or editable — "Status" is shown last instead.
-    column_order = POND_COLS + ["Status"]
+    NEW_ROW_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW", "Species Culture",
+                     "Cycle Type", "Issue 1", "Issue 2", "Issue 3", "Water Color", "Grade", "Remark"]
+    _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
+    _TEXT_COLS = ["ABW", "Species Culture", "Cycle Type", "Issue 1", "Issue 2", "Issue 3",
+                  "Water Color", "Grade", "Remark"]
 
-    editor_key = f"editor_{widget_scope}"
-    working_key = f"__pond_working_{widget_scope}"
-    working_sig_key = f"__pond_working_sig_{widget_scope}"
+    def _blank_new_rows_df():
+        dtypes = {"Date": "object", "DOC": "float64", "Density": "float64", "Feed Per Day": "float64"}
+        return pd.DataFrame({c: pd.Series(dtype=dtypes.get(c, "object")) for c in NEW_ROW_COLS})
 
     def _parse_cell_date(val):
         if val is None:
@@ -575,91 +553,75 @@ if pond_number:
             run_date = row_date
         return df
 
-    def _recompute_status(df):
-        df = df.copy()
-        df["Status"] = df["Timestamp"].apply(
-            lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
-        )
-        return df
+    editor_key = f"editor_{widget_scope}"
+    new_rows_key = f"__new_rows_{widget_scope}"
+    new_rows_sig_key = f"__new_rows_sig_{widget_scope}"
 
-    # Keep our own persistent copy of the table (separate from the widget's
-    # internal state). `editor_df` above was just rebuilt from a fresh
-    # Google Sheet read, so it always holds the latest values for every
-    # already-saved row. Switching pond/farm/customer starts a clean copy;
-    # staying on the same pond keeps any new/unsaved rows the user is
-    # entering, but always swaps in this fresh `editor_df` for the saved
-    # rows — so an edit made directly in the Google Sheet (e.g. a
-    # corrected Density) shows up right away instead of being stuck on
-    # whatever value the app first loaded.
     switch_signature = (customer, farm, pond_number)
-    if st.session_state.get(working_sig_key) != switch_signature:
-        st.session_state[working_key] = editor_df.copy()
-        st.session_state[working_sig_key] = switch_signature
+    if st.session_state.get(new_rows_sig_key) != switch_signature:
+        st.session_state[new_rows_key] = _blank_new_rows_df()
+        st.session_state[new_rows_sig_key] = switch_signature
         if editor_key in st.session_state:
             del st.session_state[editor_key]
-    else:
-        existing_working = st.session_state.get(working_key)
-        if existing_working is not None:
-            unsaved_rows = existing_working[
-                existing_working["Timestamp"].astype(str).str.strip() == ""
-            ].copy()
-            st.session_state[working_key] = pd.concat(
-                [editor_df.copy(), unsaved_rows], ignore_index=True
-            )
-        else:
-            st.session_state[working_key] = editor_df.copy()
-        if editor_key in st.session_state:
-            del st.session_state[editor_key]
+
+    issue_options_blank = [""] + ISSUES_OPTIONS
+
+    column_config = {
+        "Date": st.column_config.DateColumn("Date *", required=True),
+        "DOC": st.column_config.NumberColumn("DOC (auto)", help="Filled in automatically once you pick a Date — edit it to override", step=1),
+        "Density": st.column_config.NumberColumn("Density", step=1),
+        "Feed Per Day": st.column_config.NumberColumn("Feed/Day"),
+        "ABW": st.column_config.TextColumn("ABW"),
+        "Species Culture": st.column_config.SelectboxColumn("Species Culture *", options=SPECIES_CULTURE,
+                                                              required=True, default=default_species),
+        "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
+                                                         required=True, default=default_cycle),
+        "Issue 1": st.column_config.SelectboxColumn("Issue 1", options=issue_options_blank, required=False),
+        "Issue 2": st.column_config.SelectboxColumn("Issue 2", options=issue_options_blank, required=False),
+        "Issue 3": st.column_config.SelectboxColumn("Issue 3", options=issue_options_blank, required=False),
+        "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
+        "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
+        "Remark": st.column_config.TextColumn("Remark"),
+    }
 
     def apply_editor_changes():
-        """on_change callback: fold whatever was just typed into our working
-        copy, but IGNORE any attempted edit/delete on a row that's already
-        saved (non-blank Timestamp) — those are locked. Then recompute DOC +
-        Status and delete the widget's own delta state so Streamlit redraws
-        the table fresh from our updated copy."""
         state = st.session_state.get(editor_key)
         if not state:
             return
-        df = st.session_state[working_key].reset_index(drop=True).copy()
+        df = st.session_state[new_rows_key].reset_index(drop=True).copy()
 
         for idx, changes in state.get("edited_rows", {}).items():
             idx = int(idx)
             if idx < len(df):
-                if str(df.at[idx, "Timestamp"]).strip():
-                    continue  # locked: already saved, ignore the edit
                 for col, val in changes.items():
-                    if col in df.columns and col not in ("Timestamp", "Status"):
+                    if col in df.columns:
                         df.at[idx, col] = val
 
         for new_row in state.get("added_rows", []):
             row = {c: new_row.get(c) for c in df.columns}
-            row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
         for idx in sorted(state.get("deleted_rows", []), reverse=True):
             if idx < len(df):
-                ts = str(df.at[idx, "Timestamp"]).strip()
-                if ts:
-                    # Already-saved row: soft-delete in the Google Sheet
-                    # (flags it, keeps the underlying data), then remove it
-                    # from the screen — it will stay gone after a refresh.
-                    mark_deleted_by_timestamp(ts)
                 df = df.drop(index=idx).reset_index(drop=True)
 
-        df = _normalize_pond_dtypes(df)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        for numcol in _NUM_COLS:
+            df[numcol] = pd.to_numeric(df[numcol], errors="coerce")
+        for c in _TEXT_COLS:
+            df[c] = df[c].fillna("").astype(str)
         df = _recompute_docs(df, prev_date, prev_doc)
-        df = _recompute_status(df)
 
-        st.session_state[working_key] = df
+        st.session_state[new_rows_key] = df
         del st.session_state[editor_key]
 
     edited_df = st.data_editor(
-        st.session_state[working_key],
+        st.session_state[new_rows_key],
         column_config=column_config,
-        column_order=column_order,
+        column_order=NEW_ROW_COLS,
         num_rows="dynamic",
         use_container_width=True,
-        height=320,
+        height=240,
         key=editor_key,
         on_change=apply_editor_changes,
     )
@@ -679,25 +641,12 @@ if pond_number:
         running_prev_doc = prev_doc
         now_base = datetime.now()
 
-        rows_all = st.session_state[working_key].reset_index(drop=True)
-        any_new_rows = False
+        rows_all = st.session_state[new_rows_key].reset_index(drop=True)
+        any_new_rows = len(rows_all) > 0
 
         for i, row in rows_all.iterrows():
             row_label = f"Row {i + 1}"
-            is_saved = str(row.get("Timestamp") or "").strip() != ""
-
             row_date = _parse_cell_date(row.get("Date"))
-
-            if is_saved:
-                # Already in the sheet — skip re-saving it, but keep the
-                # running DOC/Date chain going so any new rows after it
-                # auto-calculate correctly.
-                doc_val = row.get("DOC")
-                if row_date is not None and not _doc_is_blank(doc_val):
-                    running_prev_date, running_prev_doc = row_date, int(doc_val)
-                continue
-
-            any_new_rows = True
 
             # --- Date ---
             if row_date is None:
@@ -726,6 +675,11 @@ if pond_number:
             if not cycle_val_row:
                 errors.append(f"{row_label}: Cycle Type is required"); continue
 
+            # --- Combine the 3 issue slots into one "Issues" string ---
+            issues_picked = [str(row.get(c) or "").strip() for c in ("Issue 1", "Issue 2", "Issue 3")]
+            issues_picked = [x for x in issues_picked if x]
+            issues_final = ISSUES_SEP.join(dict.fromkeys(issues_picked))
+
             row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
 
             new_records.append({
@@ -742,7 +696,7 @@ if pond_number:
                 "ABW": str(row.get("ABW") or "").strip(),
                 "Species Culture": species_val_row,
                 "Cycle Type": cycle_val_row,
-                "Issues": "" if str(row.get("Issues") or "").strip() in ("", "(none)") else str(row.get("Issues")).strip(),
+                "Issues": issues_final,
                 "Water Color": water_color_val_row,
                 "Grade": grade_val_row,
                 "Remark": str(row.get("Remark") or "").strip(),
@@ -760,8 +714,7 @@ if pond_number:
             append_records(new_records)
 
             st.success(f"✅ Saved {len(new_records)} new record(s) for Pond {pond_number}!")
-            del st.session_state[working_key]
-            del st.session_state[working_sig_key]
+            st.session_state[new_rows_key] = _blank_new_rows_df()
             if editor_key in st.session_state:
                 del st.session_state[editor_key]
             time.sleep(1)
