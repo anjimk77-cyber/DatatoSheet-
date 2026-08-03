@@ -21,8 +21,8 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 # STYLE
 # Only tables (st.dataframe) get horizontal scrolling — that's native
 # Streamlit behavior and needs no extra CSS. Everything else (the
-# customer/farm pickers, the pond record cards) should stack into a single
-# column, one field after another, on narrow / mobile screens.
+# customer/farm pickers, etc.) should stack into a single column, one
+# field after another, on narrow / mobile screens.
 # =========================================================================
 st.markdown("""
 <style>
@@ -59,7 +59,7 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
     color: #ffffff !important;
 }
 
-/* "Saved" status pill */
+/* "Saved" status pill (kept for other parts of the app that may use it) */
 .status-saved {
     display: inline-block;
     width: 100%;
@@ -80,9 +80,9 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
 }
 
 /* Mobile: stack every row of widgets into a single column, one field
-   after another. Tables (st.dataframe) are NOT built from these
-   horizontal blocks, so they are untouched and keep their own native
-   horizontal scrollbar. */
+   after another. Tables (st.dataframe / st.data_editor) are NOT built
+   from these horizontal blocks, so they are untouched and keep their
+   own native horizontal scrollbar. */
 @media (max-width: 700px) {
     div[data-testid="stHorizontalBlock"] {
         flex-direction: column !important;
@@ -119,8 +119,10 @@ MANAGEMENT_ISSUE_OPTIONS = ["Aeration System Failure", "Water Exchange Problem",
                              "Sludge & Bottom Soil Issue", "Chemical/Probiotic Overdose",
                              "Predator Attack", "Other"]
 
-# Issues is now a genuine multi-select field (a pond can have several issues
-# on the same visit). Values are stored in the sheet joined by "; ".
+# All issue categories combined. Inside the spreadsheet editor each cell can
+# only hold a single selection (a data_editor limitation), so this is used
+# as a single-select dropdown in the Issues column, same as the reference
+# spreadsheet layout.
 ISSUES_OPTIONS = (
     [f"Disease: {x}" for x in DISEASES_OPTIONS] +
     [f"Feed: {x}" for x in FEED_ISSUE_OPTIONS] +
@@ -137,7 +139,7 @@ COLUMN_ORDER = [
     "Issues", "Water Color", "Grade", "Remark", "Technician",
 ]
 
-# Columns shown/edited on each pond record card (the rest — Customer, Farm,
+# Columns shown/edited in the pond spreadsheet (the rest — Customer, Farm,
 # Zone, Area, Pond, Technician, Timestamp — come from the selectors above
 # the table and are attached automatically when a row is saved).
 POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW", "Species Culture",
@@ -194,6 +196,15 @@ def append_record(record):
     ws.append_row(row, value_input_option="USER_ENTERED")
     bump_data_version()
 
+def append_records(records):
+    """Append several records to the sheet in a single batched call."""
+    if not records:
+        return
+    ws = get_worksheet()
+    rows = [[str(r.get(c, "")) for c in COLUMN_ORDER] for r in records]
+    ws.append_rows(rows, value_input_option="USER_ENTERED")
+    bump_data_version()
+
 def update_record_by_timestamp(timestamp, record):
     ws = get_worksheet()
     cell = ws.find(str(timestamp), in_column=1)
@@ -210,6 +221,32 @@ def delete_record_by_timestamp(timestamp):
     cell = ws.find(str(timestamp), in_column=1)
     if cell:
         ws.delete_rows(cell.row)
+        bump_data_version()
+
+def delete_all_pond_records(customer, farm, pond_number):
+    """Delete every saved row for this customer+farm+pond (used right before
+    re-writing that pond's whole spreadsheet in one shot on Save)."""
+    ws = get_worksheet()
+    all_values = ws.get_all_values()
+    if not all_values:
+        return
+    header = all_values[0]
+    try:
+        idx_customer = header.index("Customer")
+        idx_farm = header.index("Farm Name with Code")
+        idx_pond = header.index("Pond Number")
+    except ValueError:
+        return
+    rows_to_delete = []
+    for i, row in enumerate(all_values[1:], start=2):
+        row = row + [""] * (len(header) - len(row))
+        if (row[idx_customer] == customer
+                and row[idx_farm] == farm
+                and row[idx_pond] == pond_number):
+            rows_to_delete.append(i)
+    for r in sorted(rows_to_delete, reverse=True):
+        ws.delete_rows(r)
+    if rows_to_delete:
         bump_data_version()
 
 def to_number(value, as_int=False):
@@ -349,7 +386,7 @@ with col4:
 technician = st.selectbox("Technician *", TECHNICIAN_OPTIONS, key="technician_select")
 
 # =========================================================================
-# STEP 4: POND SELECTION
+# STEP 4: POND DETAILS — pond selection bar, then a spreadsheet
 # =========================================================================
 st.markdown("---")
 st.markdown("#### 🐟 Pond Details")
@@ -372,8 +409,10 @@ else:
     pond_number = selected_pond_choice
     st.caption(f"Adding / editing records for Pond **{pond_number}**")
 
+widget_scope = f"{farm}_{selected_pond_choice}"
+
 # =========================================================================
-# LOAD THIS POND'S HISTORY
+# LOAD THIS POND'S HISTORY FROM THE GOOGLE SHEET
 # =========================================================================
 df_pond_hist_full = load_data()
 required_cols = {"Customer", "Farm Name with Code", "Pond Number"}
@@ -386,204 +425,271 @@ if pond_number and len(df_pond_hist_full) > 0 and required_cols.issubset(df_pond
 else:
     df_pond_hist_full = pd.DataFrame(columns=COLUMN_ORDER)
 
+prev_date = None
+prev_doc = None
+prev_species = None
+prev_cycle = None
 if len(df_pond_hist_full) > 0 and "Date" in df_pond_hist_full.columns:
     df_pond_hist_full["_ParsedDate"] = pd.to_datetime(df_pond_hist_full["Date"], errors="coerce")
     df_pond_hist_full = df_pond_hist_full.sort_values(by="_ParsedDate").reset_index(drop=True)
+    if df_pond_hist_full["_ParsedDate"].notna().any():
+        latest_idx = df_pond_hist_full["_ParsedDate"].last_valid_index()
+        prev_date = df_pond_hist_full.loc[latest_idx, "_ParsedDate"].date()
+        prev_doc = to_number(df_pond_hist_full.loc[latest_idx, "DOC"], as_int=True)
+        prev_species = str(df_pond_hist_full.loc[latest_idx].get("Species Culture") or "").strip() or None
+        prev_cycle = str(df_pond_hist_full.loc[latest_idx].get("Cycle Type") or "").strip() or None
+
+default_species = prev_species if prev_species in SPECIES_CULTURE else SPECIES_CULTURE[0]
+default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else CYCLE_TYPE[0]
 
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
-# =========================================================================
-# PER-ROW RECORD CARDS (replaces the old spreadsheet grid + single
-# "Save Changes" button). Each card has its own red "Save" button; once
-# saved, that card shows a green "Saved" status instead of the button.
-# =========================================================================
-def _row_from_series(r):
-    issues_raw = str(r.get("Issues") or "").strip()
-    issues_list = [x.strip() for x in issues_raw.split(ISSUES_SEP) if x.strip()] if issues_raw else []
-    return {
-        "row_id": str(uuid.uuid4()),
-        "timestamp": str(r.get("Timestamp") or ""),
-        "saved": True,
-        "data": {
-            "Date": pd.to_datetime(r.get("Date"), errors="coerce").date() if str(r.get("Date") or "").strip() else None,
-            "DOC": to_number(r.get("DOC"), as_int=True),
-            "Density": to_number(r.get("Density"), as_int=True),
-            "Feed Per Day": to_number(r.get("Feed Per Day")),
-            "ABW": str(r.get("ABW") or ""),
-            "Species Culture": str(r.get("Species Culture") or "") or SPECIES_CULTURE[0],
-            "Cycle Type": str(r.get("Cycle Type") or "") or CYCLE_TYPE[0],
-            "Issues": issues_list,
-            "Water Color": str(r.get("Water Color") or ""),
-            "Grade": str(r.get("Grade") or ""),
-            "Remark": str(r.get("Remark") or ""),
-        },
-    }
-
-def _blank_row(prev_row_data=None):
-    prev_row_data = prev_row_data or {}
-    return {
-        "row_id": str(uuid.uuid4()),
-        "timestamp": "",
-        "saved": False,
-        "data": {
-            "Date": None,
-            "DOC": None,
-            # Density carries forward from the previous record, exactly like
-            # Species Culture and Cycle Type already did.
-            "Density": prev_row_data.get("Density", 0),
-            "Feed Per Day": None,
-            "ABW": "",
-            "Species Culture": prev_row_data.get("Species Culture", SPECIES_CULTURE[0]),
-            "Cycle Type": prev_row_data.get("Cycle Type", CYCLE_TYPE[0]),
-            "Issues": [],
-            "Water Color": prev_row_data.get("Water Color", ""),
-            "Grade": "",
-            "Remark": "",
-        },
-    }
-
-rows_state_key = f"__pond_rows__{customer}__{farm}__{pond_number}"
-rows_sig_key = "__pond_rows_sig"
-scope_sig = (customer, farm, pond_number)
-
-if st.session_state.get(rows_sig_key) != scope_sig or rows_state_key not in st.session_state:
-    st.session_state[rows_state_key] = [_row_from_series(r) for _, r in df_pond_hist_full.iterrows()]
-    st.session_state[rows_sig_key] = scope_sig
-
-rows_list = st.session_state[rows_state_key]
-
 if pond_number:
-    if len(rows_list) == 0:
-        st.info(f"No history yet for Pond {pond_number}. Add its first record below.")
+    # "Timestamp" is kept as a hidden internal column so we know which rows
+    # already exist in the sheet (Saved) vs. which were just added in this
+    # session (New / unsaved) — that's what drives the Status column below.
+    display_cols = ["Timestamp"] + POND_COLS
+    existing_pond_cols = [c for c in display_cols if c in df_pond_hist_full.columns]
+    df_pond_hist_display = df_pond_hist_full[existing_pond_cols].copy() if len(df_pond_hist_full) > 0 \
+        else pd.DataFrame(columns=display_cols)
+    original_row_count = len(df_pond_hist_display)
 
-    running_date, running_doc = None, None
-    running_prev_data = {}
+    if original_row_count == 0:
+        st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
 
-    for idx, row in enumerate(rows_list):
-        rid = row["row_id"]
-        d = row["data"]
+    editor_df = df_pond_hist_display.copy()
+    if len(editor_df) > 0:
+        editor_df["Date"] = pd.to_datetime(editor_df["Date"], errors="coerce").dt.date
+        for numcol in ["DOC", "Density", "Feed Per Day"]:
+            editor_df[numcol] = pd.to_numeric(editor_df[numcol], errors="coerce")
+    else:
+        editor_df = pd.DataFrame({c: pd.Series(dtype="object") for c in display_cols})
+        editor_df["Date"] = editor_df["Date"].astype("object")
 
-        with st.container():
-            st.markdown('<div class="pond-card">', unsafe_allow_html=True)
-            c_date, c_doc, c_dens, c_feed, c_abw = st.columns(5)
-            with c_date:
-                date_val = st.date_input("Date *", value=d["Date"], key=f"date_{rid}")
-            with c_doc:
-                doc_default = d["DOC"]
-                if doc_default in (None, 0) and running_date is not None and running_doc is not None and date_val:
-                    doc_default = int(running_doc) + (date_val - running_date).days
-                doc_val = st.number_input("DOC", value=int(doc_default) if doc_default not in (None, "") else 0,
-                                           step=1, key=f"doc_{rid}")
-            with c_dens:
-                dens_val = st.number_input("Density", value=int(d["Density"] or 0), step=1, key=f"density_{rid}")
-            with c_feed:
-                feed_val = st.number_input("Feed/Day", value=float(d["Feed Per Day"] or 0.0), key=f"feed_{rid}")
-            with c_abw:
-                abw_val = st.text_input("ABW", value=d["ABW"], key=f"abw_{rid}")
+    if "Status" not in editor_df.columns:
+        editor_df["Status"] = editor_df["Timestamp"].apply(
+            lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
+        )
 
-            c_sp, c_cyc, c_wc, c_gr = st.columns(4)
-            with c_sp:
-                sp_default = d["Species Culture"] if d["Species Culture"] in SPECIES_CULTURE else SPECIES_CULTURE[0]
-                sp_val = st.selectbox("Species Culture *", SPECIES_CULTURE,
-                                       index=SPECIES_CULTURE.index(sp_default), key=f"species_{rid}")
-            with c_cyc:
-                cyc_default = d["Cycle Type"] if d["Cycle Type"] in CYCLE_TYPE else CYCLE_TYPE[0]
-                cyc_val = st.selectbox("Cycle Type *", CYCLE_TYPE,
-                                        index=CYCLE_TYPE.index(cyc_default), key=f"cycle_{rid}")
-            with c_wc:
-                wc_options = [""] + WATER_COLOR_OPTIONS
-                wc_default = d["Water Color"] if d["Water Color"] in wc_options else ""
-                wc_val = st.selectbox("Water Color", wc_options, index=wc_options.index(wc_default), key=f"watercolor_{rid}")
-            with c_gr:
-                gr_options = [""] + GRADE_OPTIONS
-                gr_default = d["Grade"] if d["Grade"] in gr_options else ""
-                gr_val = st.selectbox("Grade", gr_options, index=gr_options.index(gr_default), key=f"grade_{rid}")
+    column_config = {
+        "Date": st.column_config.DateColumn("Date *", required=True),
+        "DOC": st.column_config.NumberColumn("DOC (auto)", help="Filled in automatically once you pick a Date — edit it to override", step=1),
+        "Density": st.column_config.NumberColumn("Density", step=1),
+        "Feed Per Day": st.column_config.NumberColumn("Feed/Day"),
+        "ABW": st.column_config.TextColumn("ABW"),
+        "Species Culture": st.column_config.SelectboxColumn("Species Culture *", options=SPECIES_CULTURE,
+                                                              required=True, default=default_species),
+        "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
+                                                         required=True, default=default_cycle),
+        "Issues": st.column_config.SelectboxColumn("Issues", options=["(none)"] + ISSUES_OPTIONS, required=False),
+        "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
+        "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
+        "Remark": st.column_config.TextColumn("Remark"),
+        "Status": st.column_config.TextColumn("Status", disabled=True),
+    }
+    # "Timestamp" is deliberately left out of column_order so it stays in
+    # the underlying data (for matching rows back to sheet rows) without
+    # being shown or editable — "Status" is shown last instead.
+    column_order = POND_COLS + ["Status"]
 
-            c_issues, c_remark = st.columns([2, 2])
-            with c_issues:
-                issues_default = [x for x in d["Issues"] if x in ISSUES_OPTIONS]
-                issues_val = st.multiselect("Issues (select all that apply)", ISSUES_OPTIONS,
-                                             default=issues_default, key=f"issues_{rid}")
-            with c_remark:
-                remark_val = st.text_input("Remark", value=d["Remark"], key=f"remark_{rid}")
+    editor_key = f"editor_{widget_scope}"
+    working_key = f"__pond_working_{widget_scope}"
+    working_sig_key = f"__pond_working_sig_{widget_scope}"
 
-            current_values = {
-                "Date": date_val, "DOC": doc_val, "Density": dens_val, "Feed Per Day": feed_val,
-                "ABW": abw_val, "Species Culture": sp_val, "Cycle Type": cyc_val,
-                "Issues": issues_val, "Water Color": wc_val, "Grade": gr_val, "Remark": remark_val,
-            }
-            is_currently_saved = row["saved"] and row.get("saved_snapshot") == current_values
+    def _parse_cell_date(val):
+        if val is None or val == "":
+            return None
+        if isinstance(val, date):
+            return val
+        parsed = pd.to_datetime(val, errors="coerce")
+        return parsed.date() if pd.notna(parsed) else None
 
-            c_status, c_remove = st.columns([3, 1])
-            with c_status:
-                if is_currently_saved:
-                    st.markdown('<div class="status-saved">✅ Saved</div>', unsafe_allow_html=True)
+    def _doc_is_blank(val):
+        return val is None or val == "" or (isinstance(val, float) and pd.isna(val))
+
+    def _recompute_docs(df, seed_date, seed_doc):
+        """Return a copy of df with every blank DOC cell filled in, in row
+        order, using (previous row's DOC + days since previous row's Date)."""
+        df = df.reset_index(drop=True).copy()
+        run_date, run_doc = seed_date, seed_doc
+        for i in range(len(df)):
+            row_date = _parse_cell_date(df.at[i, "Date"])
+            if row_date is None:
+                continue
+            if run_date is None or run_doc is None:
+                if not _doc_is_blank(df.at[i, "DOC"]):
+                    try:
+                        run_doc = int(df.at[i, "DOC"])
+                        run_date = row_date
+                    except Exception:
+                        pass
+                continue
+            if i == 0 and not _doc_is_blank(df.at[i, "DOC"]):
+                run_doc = int(df.at[i, "DOC"])
+                run_date = row_date
+                continue
+            computed = int(run_doc) + (row_date - run_date).days
+            df.at[i, "DOC"] = computed
+            run_doc = computed
+            run_date = row_date
+        return df
+
+    def _recompute_status(df):
+        df = df.copy()
+        df["Status"] = df["Timestamp"].apply(
+            lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
+        )
+        return df
+
+    # Keep our own persistent copy of the table (separate from the widget's
+    # internal state). Re-seed it whenever we switch pond/farm/customer or
+    # right after a save changes the saved history.
+    base_signature = (customer, farm, pond_number, original_row_count)
+    if st.session_state.get(working_sig_key) != base_signature:
+        st.session_state[working_key] = editor_df.copy()
+        st.session_state[working_sig_key] = base_signature
+        if editor_key in st.session_state:
+            del st.session_state[editor_key]
+
+    def apply_editor_changes():
+        """on_change callback: fold whatever was just typed into our working
+        copy, recompute DOC + Status, then delete the widget's own delta
+        state so Streamlit redraws the table fresh from our updated copy."""
+        state = st.session_state.get(editor_key)
+        if not state:
+            return
+        df = st.session_state[working_key].reset_index(drop=True).copy()
+
+        for idx, changes in state.get("edited_rows", {}).items():
+            idx = int(idx)
+            if idx < len(df):
+                for col, val in changes.items():
+                    if col in df.columns:
+                        df.at[idx, col] = val
+
+        for new_row in state.get("added_rows", []):
+            row = {c: new_row.get(c) for c in df.columns}
+            row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+        for idx in sorted(state.get("deleted_rows", []), reverse=True):
+            if idx < len(df):
+                df = df.drop(index=idx).reset_index(drop=True)
+
+        df = _recompute_docs(df, prev_date, prev_doc)
+        df = _recompute_status(df)
+
+        st.session_state[working_key] = df
+        del st.session_state[editor_key]
+
+    edited_df = st.data_editor(
+        st.session_state[working_key],
+        column_config=column_config,
+        column_order=column_order,
+        num_rows="dynamic",
+        use_container_width=True,
+        height=320,
+        key=editor_key,
+        on_change=apply_editor_changes,
+    )
+
+    save_clicked = st.button("💾 Save Changes to Pond History", use_container_width=True,
+                              type="primary", key=f"save_{widget_scope}")
+
+    if save_clicked:
+        errors = []
+        if not customer or not farm or not zone or not area or not technician:
+            errors.append("Please fill in all required top-level fields (marked with *)")
+        if not pond_number:
+            errors.append("Pond Number is required")
+
+        new_records = []
+        running_prev_date = prev_date
+        running_prev_doc = prev_doc
+        now_base = datetime.now()
+
+        edited_rows = st.session_state[working_key].reset_index(drop=True)
+        for i, row in edited_rows.iterrows():
+            row_label = f"Row {i + 1}"
+
+            # --- Date ---
+            row_date = row.get("Date")
+            if isinstance(row_date, str) and row_date.strip():
+                parsed = pd.to_datetime(row_date, errors="coerce")
+                row_date = parsed.date() if pd.notna(parsed) else None
+            if row_date is None or (isinstance(row_date, float) and pd.isna(row_date)):
+                errors.append(f"{row_label}: Date is required")
+                continue
+
+            # --- DOC (auto-calculate if blank) ---
+            doc_raw = row.get("DOC")
+            doc_blank = doc_raw is None or (isinstance(doc_raw, float) and pd.isna(doc_raw)) or str(doc_raw).strip() == ""
+            if doc_blank:
+                if running_prev_date is not None and running_prev_doc is not None:
+                    doc_final = int(running_prev_doc) + (row_date - running_prev_date).days
                 else:
-                    save_clicked = st.button("💾 Save", key=f"save_{rid}", type="primary", use_container_width=True)
-                    if save_clicked:
-                        if date_val is None:
-                            st.error("Date is required for this row.")
-                        elif not customer or not farm or not zone or not area or not technician or not pond_number:
-                            st.error("Please fill in all required top-level fields (marked with *) above.")
-                        else:
-                            ts = row["timestamp"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            record = {
-                                "Timestamp": ts,
-                                "Customer": customer,
-                                "Farm Name with Code": farm,
-                                "Zone": zone,
-                                "Area": area,
-                                "Pond Number": pond_number,
-                                "Date": date_val.isoformat(),
-                                "DOC": int(doc_val),
-                                "Density": int(dens_val),
-                                "Feed Per Day": feed_val,
-                                "ABW": abw_val.strip(),
-                                "Species Culture": sp_val,
-                                "Cycle Type": cyc_val,
-                                "Issues": ISSUES_SEP.join(issues_val),
-                                "Water Color": wc_val,
-                                "Grade": gr_val,
-                                "Remark": remark_val.strip(),
-                                "Technician": technician,
-                            }
-                            update_record_by_timestamp(ts, record)
-                            row["timestamp"] = ts
-                            row["saved"] = True
-                            row["saved_snapshot"] = current_values
-                            st.rerun()
-            with c_remove:
-                if st.button("🗑️", key=f"remove_{rid}", use_container_width=True, help="Remove this row"):
-                    if row["saved"] and row["timestamp"]:
-                        delete_record_by_timestamp(row["timestamp"])
-                    rows_list.pop(idx)
-                    st.rerun()
+                    errors.append(f"{row_label}: DOC is required (no earlier record to auto-calculate from)")
+                    continue
+            else:
+                doc_final = to_number(doc_raw, as_int=True)
 
-            st.markdown('</div>', unsafe_allow_html=True)
+            # --- Required dropdown fields ---
+            species_val_row = str(row.get("Species Culture") or "").strip()
+            cycle_val_row = str(row.get("Cycle Type") or "").strip()
+            water_color_val_row = str(row.get("Water Color") or "").strip()
+            grade_val_row = str(row.get("Grade") or "").strip()
+            if not species_val_row:
+                errors.append(f"{row_label}: Species Culture is required"); continue
+            if not cycle_val_row:
+                errors.append(f"{row_label}: Cycle Type is required"); continue
 
-        # Chain DOC / carry-forward defaults for the next row, whether this
-        # one is saved yet or not.
-        if date_val is not None:
-            running_date, running_doc = date_val, doc_val
-        running_prev_data = current_values
+            # Existing rows keep their original Timestamp; new/blank rows get one now
+            row_timestamp = str(row.get("Timestamp") or "").strip()
+            if not row_timestamp:
+                row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
 
-    if st.button("➕ Add New Row", use_container_width=True, key=f"add_row_{customer}_{farm}_{pond_number}"):
-        rows_list.append(_blank_row(running_prev_data))
-        st.rerun()
+            new_records.append({
+                "Timestamp": row_timestamp,
+                "Customer": customer,
+                "Farm Name with Code": farm,
+                "Zone": zone,
+                "Area": area,
+                "Pond Number": pond_number,
+                "Date": row_date.isoformat(),
+                "DOC": doc_final,
+                "Density": to_number(row.get("Density"), as_int=True),
+                "Feed Per Day": to_number(row.get("Feed Per Day")),
+                "ABW": str(row.get("ABW") or "").strip(),
+                "Species Culture": species_val_row,
+                "Cycle Type": cycle_val_row,
+                "Issues": "" if str(row.get("Issues") or "").strip() in ("", "(none)") else str(row.get("Issues")).strip(),
+                "Water Color": water_color_val_row,
+                "Grade": grade_val_row,
+                "Remark": str(row.get("Remark") or "").strip(),
+                "Technician": technician,
+            })
 
-    # Downloads reflect the current saved state of this pond's history
-    df_pond_hist_display = load_data()
-    if len(df_pond_hist_display) > 0 and required_cols.issubset(df_pond_hist_display.columns):
-        df_pond_hist_display = df_pond_hist_display[
-            (df_pond_hist_display["Customer"] == customer)
-            & (df_pond_hist_display["Farm Name with Code"] == farm)
-            & (df_pond_hist_display["Pond Number"] == pond_number)
-        ][[c for c in POND_COLS if c in df_pond_hist_display.columns]]
+            running_prev_date, running_prev_doc = row_date, doc_final
 
-    if len(df_pond_hist_display) > 0:
+        if errors:
+            st.error("❌ " + "  \n❌ ".join(errors))
+        else:
+            delete_all_pond_records(customer, farm, pond_number)
+            append_records(new_records)
+
+            st.success(f"✅ Saved {len(new_records)} record(s) for Pond {pond_number}!")
+            del st.session_state[working_key]
+            del st.session_state[working_sig_key]
+            if editor_key in st.session_state:
+                del st.session_state[editor_key]
+            time.sleep(1)
+            st.rerun()
+
+    # Downloads reflect the last-saved state of this pond's history
+    if original_row_count > 0:
         pdl1, pdl2 = st.columns(2)
         with pdl1:
-            pond_csv = df_pond_hist_display.to_csv(index=False)
+            pond_csv = df_pond_hist_display[POND_COLS].to_csv(index=False)
             st.download_button(
                 "📥 Download this pond's history (CSV)", data=pond_csv,
                 file_name=f"pond_{pond_number}_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
@@ -591,7 +697,7 @@ if pond_number:
             )
         with pdl2:
             pond_buf = BytesIO()
-            df_pond_hist_display.to_excel(pond_buf, index=False, sheet_name="Pond History")
+            df_pond_hist_display[POND_COLS].to_excel(pond_buf, index=False, sheet_name="Pond History")
             pond_buf.seek(0)
             st.download_button(
                 "📥 Download this pond's history (Excel)", data=pond_buf,
