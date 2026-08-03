@@ -171,7 +171,7 @@ def get_worksheet():
     return ws
 
 @st.cache_data(show_spinner=False)
-def _load_data_cached(_version, _sheet_id):
+def _load_data_cached(data_version, sheet_id):
     ws = get_worksheet()
     records = ws.get_all_records()
     df = pd.DataFrame(records)
@@ -185,6 +185,8 @@ def _load_data_cached(_version, _sheet_id):
 
 def bump_data_version():
     st.session_state["_data_version"] = st.session_state.get("_data_version", 0) + 1
+    # also clear any stale cached copies just in case
+    _load_data_cached.clear()
 
 def load_data():
     sheet_id = st.secrets["gsheet"]["sheet_id"]
