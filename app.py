@@ -14,7 +14,7 @@ from gspread.utils import rowcol_to_a1
 # =========================================================================
 import streamlit as st
 
-st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide")
+st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide", page_icon="💧")
 
 CUSTOMER_FILE = "Customer List.xlsx"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
