@@ -119,10 +119,8 @@ MANAGEMENT_ISSUE_OPTIONS = ["Aeration System Failure", "Water Exchange Problem",
                              "Sludge & Bottom Soil Issue", "Chemical/Probiotic Overdose",
                              "Predator Attack", "Other"]
 
-# All issue categories combined, used by the multi-select "Issues" picker
-# below the pond spreadsheet. A data_editor cell can't hold a true
-# multi-select widget, so multiple picks get joined with ISSUES_SEP and
-# written into the row's Issues cell as one combined string.
+# All issue categories combined, used as the selectable options for the
+# "Issues" column directly inside the pond spreadsheet.
 ISSUES_OPTIONS = (
     [f"Disease: {x}" for x in DISEASES_OPTIONS] +
     [f"Feed: {x}" for x in FEED_ISSUE_OPTIONS] +
@@ -171,8 +169,12 @@ def get_worksheet():
         ws.update("A1", [COLUMN_ORDER])
     return ws
 
-@st.cache_data(show_spinner=False)
 def _load_data_cached(data_version, sheet_id):
+    # Always read fresh from the Google Sheet — no caching. This is what
+    # makes edits made directly in the Google Sheet (e.g. correcting a
+    # Density value, or editing any other saved cell) show up back in the
+    # app's pond history the next time the page loads/reruns, instead of
+    # being stuck showing the first value that was ever saved.
     ws = get_worksheet()
     records = ws.get_all_records()
     df = pd.DataFrame(records)
@@ -186,8 +188,6 @@ def _load_data_cached(data_version, sheet_id):
 
 def bump_data_version():
     st.session_state["_data_version"] = st.session_state.get("_data_version", 0) + 1
-    # also clear any stale cached copies just in case
-    _load_data_cached.clear()
 
 def load_data():
     """Returns the sheet's data with any soft-deleted rows filtered out. The
@@ -506,9 +506,9 @@ if pond_number:
                                                               required=True, default=default_species),
         "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
                                                          required=True, default=default_cycle),
-        "Issues": st.column_config.TextColumn(
-            "Issues", help="Use the multi-select picker below the table to fill this in, "
-                           "or type issues yourself separated by '; '"),
+        "Issues": st.column_config.SelectboxColumn(
+            "Issues", options=ISSUES_OPTIONS, required=False,
+            help="Pick the issue for this row"),
         "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
         "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
         "Remark": st.column_config.TextColumn("Remark"),
@@ -645,26 +645,6 @@ if pond_number:
         on_change=apply_editor_changes,
     )
 
-    # ---- Multi-select Issues picker: lets you tick several issues at once
-    # and apply them (joined together) to a chosen NEW row's Issues cell.
-    _current_table = st.session_state[working_key].reset_index(drop=True)
-    _new_row_idx = [i for i in _current_table.index if str(_current_table.at[i, "Timestamp"]).strip() == ""]
-    if _new_row_idx:
-        with st.expander("🏷️ Pick multiple issues for a row", expanded=False):
-            _row_labels = [f"Row {i + 1} — {_current_table.at[i, 'Date']}" for i in _new_row_idx]
-            pick_col1, pick_col2 = st.columns([1, 2])
-            with pick_col1:
-                picked_label = st.selectbox("Apply to", _row_labels, key=f"issue_row_pick_{widget_scope}")
-            with pick_col2:
-                picked_issues = st.multiselect("Issues (select one or more)", ISSUES_OPTIONS,
-                                                key=f"issue_multi_pick_{widget_scope}")
-            if st.button("Apply issues to this row", key=f"apply_issues_{widget_scope}"):
-                picked_idx = _new_row_idx[_row_labels.index(picked_label)]
-                st.session_state[working_key].at[picked_idx, "Issues"] = ISSUES_SEP.join(picked_issues)
-                st.rerun()
-    else:
-        st.caption("Add a new row in the table above, then you can multi-select its issues here.")
-
     save_clicked = st.button("💾 Save New Records", use_container_width=True,
                               type="primary", key=f"save_{widget_scope}")
 
@@ -768,46 +748,6 @@ if pond_number:
             time.sleep(1)
             st.rerun()
 
-    # Downloads reflect the last-saved state of this pond's history
-    if original_row_count > 0:
-        pdl1, pdl2 = st.columns(2)
-        with pdl1:
-            pond_csv = df_pond_hist_display[POND_COLS].to_csv(index=False)
-            st.download_button(
-                "📥 Download this pond's history (CSV)", data=pond_csv,
-                file_name=f"pond_{pond_number}_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv", use_container_width=True, key=f"dl_csv_{farm}_{pond_number}",
-            )
-        with pdl2:
-            pond_buf = BytesIO()
-            df_pond_hist_display[POND_COLS].to_excel(pond_buf, index=False, sheet_name="Pond History")
-            pond_buf.seek(0)
-            st.download_button(
-                "📥 Download this pond's history (Excel)", data=pond_buf,
-                file_name=f"pond_{pond_number}_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key=f"dl_xlsx_{farm}_{pond_number}",
-            )
-
-# =========================================================================
-# FULL DATASET (all customers & farms) — kept for reference/export only
-# =========================================================================
 st.markdown("---")
-with st.expander("📁 View / download full dataset (all customers & farms)"):
-    df_all = load_data()
-    if len(df_all) > 0:
-        existing_cols_all = [c for c in COLUMN_ORDER if c in df_all.columns]
-        extra_cols_all = [c for c in df_all.columns if c not in COLUMN_ORDER]
-        df_all_display = df_all[existing_cols_all + extra_cols_all]
-        st.dataframe(df_all_display, use_container_width=True, height=400)
-        csv_all = df_all_display.to_csv(index=False)
-        st.download_button(
-            "📥 Download full dataset (CSV)", data=csv_all,
-            file_name=f"water_quality_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv", use_container_width=True,
-        )
-    else:
-        st.write("No data yet.")
-
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>",
             unsafe_allow_html=True)
