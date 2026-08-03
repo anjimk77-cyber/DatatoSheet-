@@ -463,10 +463,20 @@ if pond_number:
         for numcol in ["DOC", "Density", "Feed Per Day"]:
             editor_df[numcol] = pd.to_numeric(editor_df[numcol], errors="coerce")
     else:
-        editor_df = pd.DataFrame({c: pd.Series(dtype="object") for c in display_cols})
-        editor_df["Date"] = editor_df["Date"].astype("object")
+        # Build the empty frame with real per-column dtypes — NumberColumn /
+        # DateColumn configs below require actual numeric/date dtypes, not
+        # generic "object", or Streamlit's newer type-checker rejects them.
+        _empty_dtypes = {
+            "Timestamp": "object", "Date": "object",
+            "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
+            "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
+            "Issues": "object", "Water Color": "object", "Grade": "object",
+            "Remark": "object",
+        }
+        editor_df = pd.DataFrame({c: pd.Series(dtype=_empty_dtypes.get(c, "object")) for c in display_cols})
 
     if "Status" not in editor_df.columns:
+
         editor_df["Status"] = editor_df["Timestamp"].apply(
             lambda t: "✅ Saved" if str(t).strip() else "🆕 New (unsaved)"
         )
