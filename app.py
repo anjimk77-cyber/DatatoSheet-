@@ -459,7 +459,14 @@ if pond_number:
 
     editor_df = df_pond_hist_display.copy()
     if len(editor_df) > 0:
-        editor_df["Date"] = pd.to_datetime(editor_df["Date"], errors="coerce").dt.date
+        # IMPORTANT: ".dt.date" turns unparseable/blank dates into NaT (a
+        # Timestamp-flavored missing marker), which mixed with real
+        # datetime.date objects in the same object-dtype column makes
+        # Streamlit's data_editor type-check reject the DateColumn config.
+        # Explicitly collapse those NaT cells down to plain None instead.
+        _raw_dates = pd.to_datetime(editor_df["Date"], errors="coerce")
+        editor_df["Date"] = _raw_dates.dt.date
+        editor_df.loc[_raw_dates.isna(), "Date"] = None
         for numcol in ["DOC", "Density", "Feed Per Day"]:
             editor_df[numcol] = pd.to_numeric(editor_df[numcol], errors="coerce")
     else:
