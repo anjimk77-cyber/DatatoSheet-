@@ -583,12 +583,31 @@ if pond_number:
         return df
 
     # Keep our own persistent copy of the table (separate from the widget's
-    # internal state). Re-seed it whenever we switch pond/farm/customer or
-    # right after a save changes the saved history.
-    base_signature = (customer, farm, pond_number, original_row_count)
-    if st.session_state.get(working_sig_key) != base_signature:
+    # internal state). `editor_df` above was just rebuilt from a fresh
+    # Google Sheet read, so it always holds the latest values for every
+    # already-saved row. Switching pond/farm/customer starts a clean copy;
+    # staying on the same pond keeps any new/unsaved rows the user is
+    # entering, but always swaps in this fresh `editor_df` for the saved
+    # rows — so an edit made directly in the Google Sheet (e.g. a
+    # corrected Density) shows up right away instead of being stuck on
+    # whatever value the app first loaded.
+    switch_signature = (customer, farm, pond_number)
+    if st.session_state.get(working_sig_key) != switch_signature:
         st.session_state[working_key] = editor_df.copy()
-        st.session_state[working_sig_key] = base_signature
+        st.session_state[working_sig_key] = switch_signature
+        if editor_key in st.session_state:
+            del st.session_state[editor_key]
+    else:
+        existing_working = st.session_state.get(working_key)
+        if existing_working is not None:
+            unsaved_rows = existing_working[
+                existing_working["Timestamp"].astype(str).str.strip() == ""
+            ].copy()
+            st.session_state[working_key] = pd.concat(
+                [editor_df.copy(), unsaved_rows], ignore_index=True
+            )
+        else:
+            st.session_state[working_key] = editor_df.copy()
         if editor_key in st.session_state:
             del st.session_state[editor_key]
 
