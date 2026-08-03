@@ -12,7 +12,31 @@ from gspread.utils import rowcol_to_a1
 # =========================================================================
 # CONFIG
 # =========================================================================
-st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide", page_icon="💧")
+import streamlit as st
+
+st.set_page_config(
+    page_title="Water Quality Report - Data Collection", 
+    layout="wide", 
+    page_icon="💧"
+)
+
+# Completely center the content vertically and horizontally on the screen
+st.markdown(
+    """
+    <div style="
+        display: flex; 
+        flex-direction: column;
+        justify-content: center; 
+        align-items: center; 
+        height: 70vh;
+        text-align: center;
+    ">
+        <h1>💧 Water Quality Report - Data Collection</h1>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
+
 
 CUSTOMER_FILE = "Customer List.xlsx"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
