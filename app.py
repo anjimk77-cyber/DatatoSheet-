@@ -432,6 +432,7 @@ prev_date = None
 prev_doc = None
 prev_species = None
 prev_cycle = None
+prev_density = None
 if len(df_pond_hist_full) > 0 and "Date" in df_pond_hist_full.columns:
     df_pond_hist_full["_ParsedDate"] = pd.to_datetime(df_pond_hist_full["Date"], errors="coerce")
     df_pond_hist_full = df_pond_hist_full.sort_values(by="_ParsedDate").reset_index(drop=True)
@@ -441,9 +442,11 @@ if len(df_pond_hist_full) > 0 and "Date" in df_pond_hist_full.columns:
         prev_doc = to_number(df_pond_hist_full.loc[latest_idx, "DOC"], as_int=True)
         prev_species = str(df_pond_hist_full.loc[latest_idx].get("Species Culture") or "").strip() or None
         prev_cycle = str(df_pond_hist_full.loc[latest_idx].get("Cycle Type") or "").strip() or None
+        prev_density = to_number(df_pond_hist_full.loc[latest_idx, "Density"], as_int=True)
 
 default_species = prev_species if prev_species in SPECIES_CULTURE else SPECIES_CULTURE[0]
 default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else CYCLE_TYPE[0]
+default_density = prev_density if prev_density else 0
 
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
@@ -522,7 +525,7 @@ if pond_number:
     column_config = {
         "Date": st.column_config.DateColumn("Date *", required=True),
         "DOC": st.column_config.NumberColumn("DOC (auto)", help="Filled in automatically once you pick a Date — edit it to override", step=1),
-        "Density": st.column_config.NumberColumn("Density", step=1),
+        "Density": st.column_config.NumberColumn("Density", step=1, default=default_density),
         "Feed Per Day": st.column_config.NumberColumn("Feed/Day"),
         "ABW": st.column_config.TextColumn("ABW"),
         "Species Culture": st.column_config.SelectboxColumn("Species Culture *", options=SPECIES_CULTURE,
