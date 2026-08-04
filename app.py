@@ -131,7 +131,7 @@ ISSUES_OPTIONS = (
     [f"Environment: {x}" for x in ENVIRONMENT_ISSUE_OPTIONS] +
     [f"Management: {x}" for x in MANAGEMENT_ISSUE_OPTIONS]
 )
-ISSUES_SEP = "; "
+ISSUES_SEP = ", "
 
 COLUMN_ORDER = [
     "Timestamp", "Customer", "Farm Name with Code", "Zone", "Area",
@@ -445,7 +445,7 @@ if len(df_pond_hist_full) > 0 and "Date" in df_pond_hist_full.columns:
         prev_density = to_number(df_pond_hist_full.loc[latest_idx, "Density"], as_int=True)
 
 default_species = prev_species if prev_species in SPECIES_CULTURE else SPECIES_CULTURE[0]
-default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else CYCLE_TYPE[0]
+default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else "Running"
 default_density = prev_density if prev_density else 0
 
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
@@ -455,25 +455,21 @@ if pond_number:
     # are already saved (non-blank Timestamp -> locked, Status = Saved) vs.
     # brand-new rows added in this session (blank Timestamp -> editable,
     # Status = New (unsaved)).
-    # The Sheet stores one "Issues" cell per row (issues joined with "; "),
-    # but the spreadsheet lets you pick more than one issue via 3 slot
-    # columns (Issue 1/2/3) — so here the saved "Issues" string is split
-    # back out into those 3 slots for display/editing.
+    # The Sheet stores one "Issues" cell per row (issues joined with
+    # ISSUES_SEP). The spreadsheet lets you pick more than one issue via a
+    # single Multiselect column — so here the saved "Issues" string is
+    # split back out into a Python list for display/editing.
     EDITOR_POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW", "Species Culture",
-                         "Cycle Type", "Issue 1", "Issue 2", "Issue 3", "Water Color", "Grade", "Remark"]
+                         "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
     display_cols = ["Timestamp"] + EDITOR_POND_COLS
     if len(df_pond_hist_full) > 0:
         _src = df_pond_hist_full.copy()
         if "Issues" in _src.columns:
-            _issue_parts = _src["Issues"].fillna("").astype(str).str.split(ISSUES_SEP, expand=True)
+            _src["Issues"] = _src["Issues"].fillna("").astype(str).apply(
+                lambda s: [p.strip() for p in s.split(ISSUES_SEP) if p.strip()]
+            )
         else:
-            _issue_parts = pd.DataFrame()
-        for _i in range(3):
-            _col_name = f"Issue {_i + 1}"
-            if _i in _issue_parts.columns:
-                _src[_col_name] = _issue_parts[_i].fillna("").astype(str).str.strip()
-            else:
-                _src[_col_name] = ""
+            _src["Issues"] = [[] for _ in range(len(_src))]
         existing_pond_cols = [c for c in display_cols if c in _src.columns]
         df_pond_hist_display = _src[existing_pond_cols].copy()
     else:
@@ -484,8 +480,21 @@ if pond_number:
         st.info(f"No history yet for Pond {pond_number}. Add its first record in the spreadsheet below.")
 
     _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
-                  "Issue 1", "Issue 2", "Issue 3", "Water Color", "Grade", "Remark"]
+                  "Water Color", "Grade", "Remark"]
     _NUM_COLS = ["DOC", "Density", "Feed Per Day"]
+
+    def _normalize_issues_cell(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if v is None:
+            return []
+        try:
+            if pd.isna(v):
+                return []
+        except (TypeError, ValueError):
+            pass
+        v = str(v).strip()
+        return [p.strip() for p in v.split(ISSUES_SEP) if p.strip()] if v else []
 
     def _normalize_pond_dtypes(df):
         df = df.copy()
@@ -496,6 +505,8 @@ if pond_number:
         for c in _TEXT_COLS:
             if c in df.columns:
                 df[c] = df[c].fillna("").astype(str)
+        if "Issues" in df.columns:
+            df["Issues"] = df["Issues"].apply(_normalize_issues_cell)
         return df
 
     if len(df_pond_hist_display) > 0:
@@ -505,7 +516,7 @@ if pond_number:
             "Timestamp": "object", "Date": "object",
             "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
             "ABW": "object", "Species Culture": "object", "Cycle Type": "object",
-            "Issue 1": "object", "Issue 2": "object", "Issue 3": "object",
+            "Issues": "object",
             "Water Color": "object", "Grade": "object",
             "Remark": "object",
         }
@@ -532,9 +543,7 @@ if pond_number:
                                                               required=True, default=default_species),
         "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
                                                          required=True, default=default_cycle),
-        "Issue 1": st.column_config.SelectboxColumn("Issue 1", options=[""] + ISSUES_OPTIONS, required=False),
-        "Issue 2": st.column_config.SelectboxColumn("Issue 2", options=[""] + ISSUES_OPTIONS, required=False),
-        "Issue 3": st.column_config.SelectboxColumn("Issue 3", options=[""] + ISSUES_OPTIONS, required=False),
+        "Issues": st.column_config.MultiselectColumn("Issues", options=ISSUES_OPTIONS, default=[]),
         "Water Color": st.column_config.SelectboxColumn("Water Color", options=WATER_COLOR_OPTIONS, required=False),
         "Grade": st.column_config.SelectboxColumn("Grade", options=GRADE_OPTIONS, required=False),
         "Remark": st.column_config.TextColumn("Remark"),
@@ -660,6 +669,8 @@ if pond_number:
         for new_row in state.get("added_rows", []):
             row = {c: new_row.get(c) for c in df.columns}
             row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
+            if not isinstance(row.get("Issues"), list):
+                row["Issues"] = []
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
         for idx in sorted(state.get("deleted_rows", []), reverse=True):
@@ -677,7 +688,13 @@ if pond_number:
         df = _recompute_status(df)
 
         st.session_state[working_key] = df
-        del st.session_state[editor_key]
+        # Clear only the widget's own edit-tracking (not the whole widget
+        # state) so the grid doesn't get fully remounted on every keystroke
+        # — that remount was what reset the scroll position/focus back to
+        # the top of the spreadsheet after each cell edit.
+        state["edited_rows"] = {}
+        state["added_rows"] = []
+        state["deleted_rows"] = []
 
     edited_df = st.data_editor(
         st.session_state[working_key],
@@ -752,9 +769,12 @@ if pond_number:
             if not cycle_val_row:
                 errors.append(f"{row_label}: Cycle Type is required"); continue
 
-            # --- Combine the 3 issue slots into one "Issues" string ---
-            issues_picked = [str(row.get(c) or "").strip() for c in ("Issue 1", "Issue 2", "Issue 3")]
-            issues_picked = [x for x in issues_picked if x]
+            # --- Combine the selected Issues (multiselect) into one string ---
+            issues_val = row.get("Issues")
+            if isinstance(issues_val, list):
+                issues_picked = [str(x).strip() for x in issues_val if str(x).strip()]
+            else:
+                issues_picked = [str(issues_val).strip()] if str(issues_val or "").strip() else []
             issues_final = ISSUES_SEP.join(dict.fromkeys(issues_picked))
 
             row_timestamp = (now_base + pd.Timedelta(milliseconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f")
