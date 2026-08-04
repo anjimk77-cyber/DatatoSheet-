@@ -739,13 +739,18 @@ def _pond_editor_fragment():
             use_container_width=True,
             height=320,
             key=editor_key,
-            on_change=apply_editor_changes,
         )
 
         save_clicked = st.form_submit_button("💾 Save New Records", use_container_width=True,
                                               type="primary")
 
     if save_clicked:
+        # Forms don't allow on_change callbacks on widgets other than the
+        # submit button itself, so the edits/adds/deletes that piled up in
+        # the data_editor's own widget state while the form was open get
+        # merged into our working copy here, right as Save is clicked.
+        apply_editor_changes()
+
         errors = []
         if not customer or not farm or not zone or not area or not technician:
             errors.append("Please fill in all required top-level fields (marked with *)")
