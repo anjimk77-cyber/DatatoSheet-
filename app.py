@@ -679,6 +679,19 @@ def _pond_editor_fragment():
             ("Date" in changes or "DOC" in changes) for changes in edited_rows.values()
         )
 
+        if not needs_recompute:
+            # A plain edit to a non-Date/DOC column. The widget already
+            # holds this value internally (that's how it produced the edit
+            # in the first place), and Save reads the final data straight
+            # from the widget's return value, so there is nothing to fold
+            # back here. Deliberately NOT touching working_key/state means
+            # we never hand st.data_editor a "new" value on these edits,
+            # which is what was resetting the scroll position / focus back
+            # to the top of the grid on every keystroke. We also leave
+            # edited_rows uncleared so it's still applied later if a real
+            # recompute (Date/DOC edit, add, delete) happens afterwards.
+            return
+
         df = st.session_state[working_key]
         df.reset_index(drop=True, inplace=True)
 
@@ -708,10 +721,9 @@ def _pond_editor_fragment():
                     mark_deleted_by_timestamp(ts)
                 df = df.drop(index=idx).reset_index(drop=True)
 
-        if needs_recompute:
-            df = _normalize_pond_dtypes(df)
-            df = _recompute_docs(df, prev_date, prev_doc)
-            df = _recompute_status(df)
+        df = _normalize_pond_dtypes(df)
+        df = _recompute_docs(df, prev_date, prev_doc)
+        df = _recompute_status(df)
 
         st.session_state[working_key] = df
         # Clear only the widget's own edit-tracking (not the whole widget
@@ -748,7 +760,11 @@ def _pond_editor_fragment():
         running_prev_doc = prev_doc
         now_base = datetime.now()
 
-        rows_all = st.session_state[working_key].reset_index(drop=True)
+        # Use the widget's own current data (edited_df) rather than
+        # working_key: working_key is now only updated on Date/DOC edits
+        # and add/delete, while edited_df always reflects every value
+        # currently shown on screen, including plain edits to other columns.
+        rows_all = edited_df.reset_index(drop=True)
         any_new_rows = False
 
         for i, row in rows_all.iterrows():
