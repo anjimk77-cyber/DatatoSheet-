@@ -450,7 +450,14 @@ default_density = prev_density if prev_density else 0
 
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
-if pond_number:
+@st.fragment
+def _pond_editor_fragment():
+    # Wrapped in @st.fragment so that editing a cell only reruns this piece
+    # of the page instead of the entire script (customer/farm lookups,
+    # Google Sheet reads, etc.) — this cuts down on how much of the page
+    # gets touched per keystroke, which helps with the grid resetting its
+    # scroll position (a known Streamlit limitation with dependent columns
+    # like our DOC auto-calc / Status: https://github.com/streamlit/streamlit/issues/10181).
     # "Timestamp" is kept as a hidden internal column so we know which rows
     # are already saved (non-blank Timestamp -> locked, Status = Saved) vs.
     # brand-new rows added in this session (blank Timestamp -> editable,
@@ -836,6 +843,9 @@ if pond_number:
                 del st.session_state[editor_key]
             time.sleep(1)
             st.rerun()
+
+if pond_number:
+    _pond_editor_fragment()
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>",
