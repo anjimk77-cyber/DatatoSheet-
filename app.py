@@ -649,15 +649,33 @@ if pond_number:
     def apply_editor_changes():
         """on_change callback: fold whatever was just typed into our working
         copy, but IGNORE any attempted edit/delete on a row that's already
-        saved (non-blank Timestamp) — those are locked. Then recompute DOC +
-        Status and delete the widget's own delta state so Streamlit redraws
-        the table fresh from our updated copy."""
+        saved (non-blank Timestamp) — those are locked.
+
+        DOC auto-calc and the Status column only ever depend on the Date/DOC
+        chain and on rows being added/removed. So we only run the full
+        rebuild (_normalize_pond_dtypes / _recompute_docs / _recompute_status)
+        when one of those actually happened. A plain edit to any other column
+        (Density, Species, Cycle, Water Color, Grade, Remark, Issues, ABW)
+        just patches that one cell in place on the SAME dataframe object
+        instead of rebuilding a fresh one — passing a materially-identical
+        dataframe back into the grid on every keystroke was what made it
+        reset its scroll position back to the first columns each time."""
         state = st.session_state.get(editor_key)
         if not state:
             return
-        df = st.session_state[working_key].reset_index(drop=True).copy()
 
-        for idx, changes in state.get("edited_rows", {}).items():
+        edited_rows = state.get("edited_rows", {})
+        added_rows = state.get("added_rows", [])
+        deleted_rows = state.get("deleted_rows", [])
+
+        needs_recompute = bool(added_rows) or bool(deleted_rows) or any(
+            ("Date" in changes or "DOC" in changes) for changes in edited_rows.values()
+        )
+
+        df = st.session_state[working_key]
+        df.reset_index(drop=True, inplace=True)
+
+        for idx, changes in edited_rows.items():
             idx = int(idx)
             if idx < len(df):
                 if str(df.at[idx, "Timestamp"]).strip():
@@ -666,14 +684,14 @@ if pond_number:
                     if col in df.columns and col not in ("Timestamp", "Status"):
                         df.at[idx, col] = val
 
-        for new_row in state.get("added_rows", []):
+        for new_row in added_rows:
             row = {c: new_row.get(c) for c in df.columns}
             row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
             if not isinstance(row.get("Issues"), list):
                 row["Issues"] = []
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
-        for idx in sorted(state.get("deleted_rows", []), reverse=True):
+        for idx in sorted(deleted_rows, reverse=True):
             if idx < len(df):
                 ts = str(df.at[idx, "Timestamp"]).strip()
                 if ts:
@@ -683,9 +701,10 @@ if pond_number:
                     mark_deleted_by_timestamp(ts)
                 df = df.drop(index=idx).reset_index(drop=True)
 
-        df = _normalize_pond_dtypes(df)
-        df = _recompute_docs(df, prev_date, prev_doc)
-        df = _recompute_status(df)
+        if needs_recompute:
+            df = _normalize_pond_dtypes(df)
+            df = _recompute_docs(df, prev_date, prev_doc)
+            df = _recompute_status(df)
 
         st.session_state[working_key] = df
         # Clear only the widget's own edit-tracking (not the whole widget
