@@ -853,6 +853,37 @@ def _pond_editor_fragment():
 if pond_number:
     _pond_editor_fragment()
 
+# =========================================================================
+# FARM SUMMARY — every saved record for this Customer + Farm Name with
+# Code, across ALL ponds (not just the pond currently selected above).
+# Always reads fresh from the Google Sheet via load_data(), so it already
+# reflects new saves, direct Sheet edits, and soft-deletes.
+# =========================================================================
+st.markdown("---")
+st.markdown(f"#### 📊 All Saved Records — {farm}")
+
+df_farm_summary = load_data()
+_farm_required = {"Customer", "Farm Name with Code"}
+if len(df_farm_summary) > 0 and _farm_required.issubset(df_farm_summary.columns):
+    df_farm_summary = df_farm_summary[
+        (df_farm_summary["Customer"] == customer) & (df_farm_summary["Farm Name with Code"] == farm)
+    ].copy()
+else:
+    df_farm_summary = pd.DataFrame(columns=COLUMN_ORDER)
+
+if len(df_farm_summary) > 0:
+    if "Date" in df_farm_summary.columns:
+        df_farm_summary["_ParsedDate"] = pd.to_datetime(df_farm_summary["Date"], errors="coerce")
+        sort_cols = [c for c in ["Pond Number"] if c in df_farm_summary.columns] + ["_ParsedDate"]
+        df_farm_summary = df_farm_summary.sort_values(by=sort_cols).drop(columns=["_ParsedDate"])
+    _farm_display_cols = ["Pond Number", "Date", "Species Culture", "Cycle Type", "DOC", "Density",
+                           "Feed Per Day", "ABW", "Issues", "Water Color", "Grade", "Remark", "Technician"]
+    _farm_display_cols = [c for c in _farm_display_cols if c in df_farm_summary.columns]
+    st.dataframe(df_farm_summary[_farm_display_cols], use_container_width=True, hide_index=True)
+    st.caption(f"{len(df_farm_summary)} saved record(s) across all ponds for {farm}.")
+else:
+    st.info(f"No saved records yet for {farm}.")
+
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>",
             unsafe_allow_html=True)
