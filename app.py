@@ -542,7 +542,7 @@ def _pond_editor_fragment():
 
     column_config = {
         "Date": st.column_config.DateColumn("Date *", required=True),
-        "DOC": st.column_config.NumberColumn("DOC (auto)", help="Auto-calculated from the Date when you click Save — edit it to override", step=1),
+        "DOC": st.column_config.NumberColumn("DOC (auto)", help="Filled in automatically once you pick a Date — edit it to override", step=1),
         "Density": st.column_config.NumberColumn("Density", step=1, default=default_density),
         "Feed Per Day": st.column_config.NumberColumn("Feed/Day"),
         "ABW": st.column_config.TextColumn("ABW"),
@@ -722,28 +722,19 @@ def _pond_editor_fragment():
         state["added_rows"] = []
         state["deleted_rows"] = []
 
-    with st.form(key=f"pond_form_{widget_scope}", clear_on_submit=False):
-        # Wrapped in a form so that filling in cells across the row (Date,
-        # Density, Species, etc.) does NOT trigger a rerun after every single
-        # keystroke — that per-keystroke rerun was what reset the grid's
-        # scroll position back to the first columns each time. Inside a
-        # form, edits/adds/deletes are only sent to Streamlit (and
-        # apply_editor_changes only runs) once, when "Save New Records" is
-        # clicked below — so you can scroll and fill in as many cells as you
-        # like first, without any interruption.
-        edited_df = st.data_editor(
-            st.session_state[working_key],
-            column_config=column_config,
-            column_order=column_order,
-            num_rows="dynamic",
-            use_container_width=True,
-            height=320,
-            key=editor_key,
-            on_change=apply_editor_changes,
-        )
+    edited_df = st.data_editor(
+        st.session_state[working_key],
+        column_config=column_config,
+        column_order=column_order,
+        num_rows="dynamic",
+        use_container_width=True,
+        height=320,
+        key=editor_key,
+        on_change=apply_editor_changes,
+    )
 
-        save_clicked = st.form_submit_button("💾 Save New Records", use_container_width=True,
-                                              type="primary")
+    save_clicked = st.button("💾 Save New Records", use_container_width=True,
+                              type="primary", key=f"save_{widget_scope}")
 
     if save_clicked:
         errors = []
