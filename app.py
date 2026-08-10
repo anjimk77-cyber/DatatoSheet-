@@ -142,6 +142,7 @@ COLUMN_ORDER = [
     "DOC", "Density", "Feed Per Day", "ABW",
     "Issues", "Water Color", "Grade", "Remark", "Technician",
     "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
+    "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2",
     "Deleted",
 ]
 
@@ -172,7 +173,8 @@ def get_worksheet():
         ws.append_row(COLUMN_ORDER, value_input_option="USER_ENTERED")
     # Make sure the header row matches what we expect (self-heals a blank sheet,
     # and adds any new columns — e.g. Harvest Date / Harvest Type / Harvest KG
-    # / Harvest ABW — to a
+    # / Harvest ABW / Harvest Date 2 / Harvest Type 2 / Harvest KG 2 /
+    # Harvest ABW 2 — to a
     # sheet that was created before they existed).
     header = ws.row_values(1)
     if header != COLUMN_ORDER:
@@ -223,19 +225,23 @@ def mark_deleted_by_timestamp(timestamp):
         ws.update_cell(cell.row, deleted_col_index, "Yes")
         bump_data_version()
 
-def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_kg="", harvest_abw=""):
-    """Writes Harvest Date / Harvest Type / Harvest KG / Harvest ABW onto the
-    existing saved row that matches this Timestamp (i.e. an existing Pond
-    Details record), instead of creating a brand-new row. Harvest KG and
-    Harvest ABW are optional — an empty string just clears that cell."""
+def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_kg="", harvest_abw="", slot=1):
+    """Writes Harvest Date/Type/KG/ABW onto the existing saved row that
+    matches this Timestamp (i.e. an existing Pond Details record), instead
+    of creating a brand-new row. Harvest KG and Harvest ABW are optional —
+    an empty string just clears that cell. `slot` picks which set of
+    Harvest columns to write: 1 -> "Harvest Date/Type/KG/ABW" (the first
+    harvest), 2 -> "Harvest Date 2/Type 2/KG 2/ABW 2" (a second harvest for
+    the same pond row, e.g. a partial harvest followed by a later one)."""
     ws = get_worksheet()
     cell = ws.find(str(timestamp), in_column=1)
     if not cell:
         return False
-    harvest_date_col = COLUMN_ORDER.index("Harvest Date") + 1
-    harvest_type_col = COLUMN_ORDER.index("Harvest Type") + 1
-    harvest_kg_col = COLUMN_ORDER.index("Harvest KG") + 1
-    harvest_abw_col = COLUMN_ORDER.index("Harvest ABW") + 1
+    suffix = "" if slot == 1 else " 2"
+    harvest_date_col = COLUMN_ORDER.index(f"Harvest Date{suffix}") + 1
+    harvest_type_col = COLUMN_ORDER.index(f"Harvest Type{suffix}") + 1
+    harvest_kg_col = COLUMN_ORDER.index(f"Harvest KG{suffix}") + 1
+    harvest_abw_col = COLUMN_ORDER.index(f"Harvest ABW{suffix}") + 1
     ws.update_cell(cell.row, harvest_date_col, harvest_date)
     ws.update_cell(cell.row, harvest_type_col, harvest_type)
     ws.update_cell(cell.row, harvest_kg_col, harvest_kg)
@@ -882,11 +888,13 @@ if pond_number:
 
 # =========================================================================
 # STEP 5: HARVEST DETAILS — Date + Harvest Type (required), plus optional
-# Harvest KG and Harvest ABW, then Submit writes all four onto the CURRENT
-# pond's row in the Google Sheet (its latest saved Pond Details record). No
-# date-matching against existing rows is done — the values are simply
-# written onto that pond's row. Submitting again (e.g. after changing any
-# of the values) updates the same row's Harvest fields in place.
+# Harvest KG and Harvest ABW. This pond's row supports up to TWO harvest
+# records: "Harvest Date/Type/KG/ABW" (the first harvest) and
+# "Harvest Date 2/Type 2/KG 2/ABW 2" (a second harvest, e.g. a later
+# partial/full harvest for the same pond). Whichever slot is still empty is
+# the one this form saves into next — no date-matching, and no
+# overwrite-warning caption; the app just quietly fills the next open slot,
+# or edits the last slot again if both are already filled.
 # =========================================================================
 st.markdown("---")
 st.markdown("#### 🌾 Harvest Details")
@@ -908,25 +916,50 @@ else:
     existing_harvest_kg = str(pond_row.get("Harvest KG") or "").strip()
     existing_harvest_abw = str(pond_row.get("Harvest ABW") or "").strip()
 
+    existing_harvest_date2 = str(pond_row.get("Harvest Date 2") or "").strip()
+    existing_harvest_type2 = str(pond_row.get("Harvest Type 2") or "").strip()
+    existing_harvest_kg2 = str(pond_row.get("Harvest KG 2") or "").strip()
+    existing_harvest_abw2 = str(pond_row.get("Harvest ABW 2") or "").strip()
+
+    slot1_filled = bool(existing_harvest_date or existing_harvest_type)
+    slot2_filled = bool(existing_harvest_date2 or existing_harvest_type2)
+
+    if not slot1_filled:
+        target_slot = 1
+        prefill_date, prefill_type = existing_harvest_date, existing_harvest_type
+        prefill_kg, prefill_abw = existing_harvest_kg, existing_harvest_abw
+    elif not slot2_filled:
+        # First harvest already saved — this submission records the
+        # SECOND harvest, so start from a blank form.
+        target_slot = 2
+        prefill_date, prefill_type, prefill_kg, prefill_abw = "", "", "", ""
+    else:
+        # Both slots already used — keep editing the second one.
+        target_slot = 2
+        prefill_date, prefill_type = existing_harvest_date2, existing_harvest_type2
+        prefill_kg, prefill_abw = existing_harvest_kg2, existing_harvest_abw2
+
     def _parse_existing_harvest_date(val):
         parsed = pd.to_datetime(val, errors="coerce")
         return parsed.date() if pd.notna(parsed) else date.today()
+
+    st.caption(f"📌 This will be saved as Harvest {target_slot} for Pond {pond_number}.")
 
     hv_col1, hv_col2 = st.columns(2)
     with hv_col1:
         harvest_date_input = st.date_input(
             "Harvest Date *",
-            value=_parse_existing_harvest_date(existing_harvest_date) if existing_harvest_date else date.today(),
-            key=f"harvest_date_{widget_scope}",
+            value=_parse_existing_harvest_date(prefill_date) if prefill_date else date.today(),
+            key=f"harvest_date_{widget_scope}_{target_slot}",
         )
     with hv_col2:
         default_harvest_index = (
-            HARVEST_TYPE_OPTIONS.index(existing_harvest_type)
-            if existing_harvest_type in HARVEST_TYPE_OPTIONS else 0
+            HARVEST_TYPE_OPTIONS.index(prefill_type)
+            if prefill_type in HARVEST_TYPE_OPTIONS else 0
         )
         harvest_type = st.selectbox(
             "Harvest Type *", HARVEST_TYPE_OPTIONS, index=default_harvest_index,
-            key=f"harvest_type_{widget_scope}",
+            key=f"harvest_type_{widget_scope}_{target_slot}",
         )
 
     # Harvest KG and Harvest ABW are optional (not required) — plain text
@@ -934,20 +967,11 @@ else:
     hv_col3, hv_col4 = st.columns(2)
     with hv_col3:
         harvest_kg_input = st.text_input(
-            "Harvest KG", value=existing_harvest_kg, key=f"harvest_kg_{widget_scope}",
+            "Harvest KG", value=prefill_kg, key=f"harvest_kg_{widget_scope}_{target_slot}",
         )
     with hv_col4:
         harvest_abw_input = st.text_input(
-            "Harvest ABW", value=existing_harvest_abw, key=f"harvest_abw_{widget_scope}",
-        )
-
-    if existing_harvest_date or existing_harvest_type or existing_harvest_kg or existing_harvest_abw:
-        st.caption(
-            f"ℹ️ Harvest info already saved for Pond {pond_number} — **{existing_harvest_date} "
-            f"({existing_harvest_type})**"
-            + (f", KG: {existing_harvest_kg}" if existing_harvest_kg else "")
-            + (f", ABW: {existing_harvest_abw}" if existing_harvest_abw else "")
-            + ". Submitting again will update/overwrite it in the Google Sheet."
+            "Harvest ABW", value=prefill_abw, key=f"harvest_abw_{widget_scope}_{target_slot}",
         )
 
     if st.button("✅ Submit Harvest", key=f"harvest_submit_{widget_scope}"):
@@ -955,9 +979,12 @@ else:
             st.error("❌ Could not find that record's timestamp — please refresh and try again.")
         elif update_harvest_by_timestamp(
             harvest_row_timestamp, harvest_date_input.isoformat(), harvest_type,
-            harvest_kg_input.strip(), harvest_abw_input.strip(),
+            harvest_kg_input.strip(), harvest_abw_input.strip(), slot=target_slot,
         ):
-            st.success(f"✅ Harvest info saved for Pond {pond_number} — {harvest_date_input.isoformat()} ({harvest_type}).")
+            st.success(
+                f"✅ Harvest {target_slot} info saved for Pond {pond_number} — "
+                f"{harvest_date_input.isoformat()} ({harvest_type})."
+            )
             time.sleep(1)
             st.rerun()
         else:
@@ -988,7 +1015,8 @@ if len(df_farm_summary) > 0:
         df_farm_summary = df_farm_summary.sort_values(by=sort_cols).drop(columns=["_ParsedDate"])
     _farm_display_cols = ["Pond Number", "Date", "Species Culture", "Cycle Type", "DOC", "Density",
                            "Feed Per Day", "ABW", "Issues", "Water Color", "Grade", "Remark", "Technician",
-                           "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW"]
+                           "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
+                           "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2"]
     _farm_display_cols = [c for c in _farm_display_cols if c in df_farm_summary.columns]
     st.dataframe(df_farm_summary[_farm_display_cols], use_container_width=True, hide_index=True)
     st.caption(f"{len(df_farm_summary)} saved record(s) across all ponds for {farm}.")
