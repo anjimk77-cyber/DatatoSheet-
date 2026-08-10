@@ -133,11 +133,15 @@ ISSUES_OPTIONS = (
 )
 ISSUES_SEP = ", "
 
+# Options for the new Harvest Details section.
+HARVEST_TYPE_OPTIONS = ["Full H", "Partial H"]
+
 COLUMN_ORDER = [
     "Timestamp", "Customer", "Farm Name with Code", "Zone", "Area",
     "Pond Number", "Date", "Species Culture", "Cycle Type",
     "DOC", "Density", "Feed Per Day", "ABW",
     "Issues", "Water Color", "Grade", "Remark", "Technician",
+    "Harvest Status", "Harvest Type",
     "Deleted",
 ]
 
@@ -166,7 +170,9 @@ def get_worksheet():
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=len(COLUMN_ORDER) + 2)
         ws.append_row(COLUMN_ORDER, value_input_option="USER_ENTERED")
-    # Make sure the header row matches what we expect (self-heals a blank sheet)
+    # Make sure the header row matches what we expect (self-heals a blank sheet,
+    # and adds any new columns — e.g. Harvest Status / Harvest Type — to a
+    # sheet that was created before they existed).
     header = ws.row_values(1)
     if header != COLUMN_ORDER:
         ws.update("A1", [COLUMN_ORDER])
@@ -215,6 +221,21 @@ def mark_deleted_by_timestamp(timestamp):
         deleted_col_index = COLUMN_ORDER.index("Deleted") + 1
         ws.update_cell(cell.row, deleted_col_index, "Yes")
         bump_data_version()
+
+def update_harvest_by_timestamp(timestamp, harvest_type):
+    """Writes Harvest Status / Harvest Type onto the existing saved row that
+    matches this Timestamp (i.e. an existing Pond Details record), instead
+    of creating a brand-new row."""
+    ws = get_worksheet()
+    cell = ws.find(str(timestamp), in_column=1)
+    if not cell:
+        return False
+    harvest_status_col = COLUMN_ORDER.index("Harvest Status") + 1
+    harvest_type_col = COLUMN_ORDER.index("Harvest Type") + 1
+    ws.update_cell(cell.row, harvest_status_col, "Harvested")
+    ws.update_cell(cell.row, harvest_type_col, harvest_type)
+    bump_data_version()
+    return True
 
 def append_record(record):
     ws = get_worksheet()
@@ -722,8 +743,8 @@ def _pond_editor_fragment():
         st.session_state[working_key] = df
         # Clear only the widget's own edit-tracking (not the whole widget
         # state) so the grid doesn't get fully remounted on every keystroke
-        # — that remount was what reset the scroll position/focus back to
-        # the top of the spreadsheet after each cell edit.
+        # — that remount was what reset the scroll position/focus after
+        # each cell edit.
         state["edited_rows"] = {}
         state["added_rows"] = []
         state["deleted_rows"] = []
@@ -854,6 +875,50 @@ if pond_number:
     _pond_editor_fragment()
 
 # =========================================================================
+# STEP 5: HARVEST DETAILS — pick the Date of an existing saved record for
+# this pond and a Harvest Type, then Submit writes "Harvest Status" and
+# "Harvest Type" onto that SAME row in the Google Sheet (it does not
+# create a new row).
+# =========================================================================
+st.markdown("---")
+st.markdown("#### 🌾 Harvest Details")
+
+if not pond_number:
+    st.info("Select a pond above to record harvest details.")
+else:
+    hv_col1, hv_col2 = st.columns(2)
+    with hv_col1:
+        harvest_date = st.date_input("Date *", value=date.today(), key=f"harvest_date_{widget_scope}")
+    with hv_col2:
+        harvest_type = st.selectbox("Harvest Type *", HARVEST_TYPE_OPTIONS, key=f"harvest_type_{widget_scope}")
+
+    if st.button("✅ Submit Harvest", key=f"harvest_submit_{widget_scope}"):
+        match = pd.DataFrame()
+        if len(df_pond_hist_full) > 0 and "_ParsedDate" in df_pond_hist_full.columns:
+            match = df_pond_hist_full[
+                df_pond_hist_full["_ParsedDate"] == pd.Timestamp(harvest_date)
+            ]
+
+        if len(match) == 0:
+            st.error(
+                f"❌ No saved record found for Pond {pond_number} on {harvest_date.isoformat()}. "
+                "The date must match an existing record already saved in Pond Details above."
+            )
+        else:
+            harvest_timestamp = str(match.iloc[-1]["Timestamp"]).strip()
+            if not harvest_timestamp:
+                st.error("❌ Could not find a saved record's timestamp to update.")
+            elif update_harvest_by_timestamp(harvest_timestamp, harvest_type):
+                st.success(
+                    f"✅ Harvest info saved for Pond {pond_number} on {harvest_date.isoformat()} "
+                    f"({harvest_type})."
+                )
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("❌ Could not find that record in the Google Sheet.")
+
+# =========================================================================
 # FARM SUMMARY — every saved record for this Customer + Farm Name with
 # Code, across ALL ponds (not just the pond currently selected above).
 # Always reads fresh from the Google Sheet via load_data(), so it already
@@ -877,7 +942,8 @@ if len(df_farm_summary) > 0:
         sort_cols = [c for c in ["Pond Number"] if c in df_farm_summary.columns] + ["_ParsedDate"]
         df_farm_summary = df_farm_summary.sort_values(by=sort_cols).drop(columns=["_ParsedDate"])
     _farm_display_cols = ["Pond Number", "Date", "Species Culture", "Cycle Type", "DOC", "Density",
-                           "Feed Per Day", "ABW", "Issues", "Water Color", "Grade", "Remark", "Technician"]
+                           "Feed Per Day", "ABW", "Issues", "Water Color", "Grade", "Remark", "Technician",
+                           "Harvest Status", "Harvest Type"]
     _farm_display_cols = [c for c in _farm_display_cols if c in df_farm_summary.columns]
     st.dataframe(df_farm_summary[_farm_display_cols], use_container_width=True, hide_index=True)
     st.caption(f"{len(df_farm_summary)} saved record(s) across all ponds for {farm}.")
