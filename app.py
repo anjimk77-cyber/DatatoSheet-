@@ -14,7 +14,7 @@ from gspread.utils import rowcol_to_a1
 # =========================================================================
 import streamlit as st
 
-st.set_page_config(page_title="Water Quality Report - Data Collection", layout="wide", page_icon="💧")
+st.set_page_config(page_title="Water Quality & Harvest Report - Data Collection", layout="wide", page_icon="💧")
 
 CUSTOMER_FILE = "Customer List.xlsx"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -97,7 +97,7 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center;'>Water Quality Report - Data Collection -</h1>",
+st.markdown("<h1 style='text-align: center;'>Water Quality & Harvest Report - Data Collection</h1>",
             unsafe_allow_html=True)
 st.subheader("KMN Aqua Services")
 st.markdown("---")
