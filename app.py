@@ -204,8 +204,8 @@ COLUMN_ORDER = [
 # Columns shown/edited in the pond spreadsheet (the rest — Customer, Farm,
 # Zone, Area, Pond, Technician, Timestamp — come from the selectors above
 # the table and are attached automatically when a row is saved).
-POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW",
-             "Expect Harvest (KG)", "Survival QTY", "Species Culture",
+POND_COLS = ["Date", "DOC", "Species Culture", "Density", "Feed Per Day", "ABW",
+             "Expect Harvest (KG)", "Survival QTY",
              "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
 
 # =========================================================================
@@ -657,7 +657,13 @@ def _pond_editor_fragment():
     # "Timestamp" is deliberately left out of column_order so it stays in
     # the underlying data (for locking rows / matching to sheet rows)
     # without being shown or editable — "Status" is shown last instead.
-    column_order = EDITOR_POND_COLS + ["Status"]
+    # This is purely the VISUAL order the grid displays columns in — it's
+    # independent of EDITOR_POND_COLS / the working dataframe's own column
+    # order and of the Google Sheet's COLUMN_ORDER (data storage is
+    # unaffected). Species Culture is placed 3rd, right after Date/DOC.
+    column_order = ["Date", "DOC", "Species Culture", "Density", "Feed Per Day",
+                     "ABW", "Expect Harvest (KG)", "Survival QTY",
+                     "Cycle Type", "Issues", "Water Color", "Grade", "Remark", "Status"]
 
     editor_key = f"editor_{widget_scope}"
     working_key = f"__pond_working_{widget_scope}"
@@ -1120,8 +1126,25 @@ else:
     df_farm_summary = pd.DataFrame(columns=COLUMN_ORDER)
 
 if len(df_farm_summary) > 0:
+    total_expect_harvest_kg = None
     if "Date" in df_farm_summary.columns:
         df_farm_summary["_ParsedDate"] = pd.to_datetime(df_farm_summary["Date"], errors="coerce")
+
+        # Total Expect Harvest (KG) for the farm = each pond's MOST RECENT
+        # saved record's "Expect Harvest (KG)" value, summed across every
+        # pond on this farm (not every historical row, which would double
+        # count a pond's earlier daily estimates).
+        if {"Pond Number", "Expect Harvest (KG)"}.issubset(df_farm_summary.columns):
+            _latest_per_pond = (
+                df_farm_summary.dropna(subset=["_ParsedDate"])
+                .sort_values("_ParsedDate")
+                .groupby("Pond Number", as_index=False)
+                .last()
+            )
+            _harvest_vals = pd.to_numeric(_latest_per_pond["Expect Harvest (KG)"], errors="coerce").dropna()
+            if len(_harvest_vals) > 0:
+                total_expect_harvest_kg = float(_harvest_vals.sum())
+
         sort_cols = [c for c in ["Pond Number"] if c in df_farm_summary.columns] + ["_ParsedDate"]
         df_farm_summary = df_farm_summary.sort_values(by=sort_cols).drop(columns=["_ParsedDate"])
 
@@ -1183,6 +1206,12 @@ if len(df_farm_summary) > 0:
         unsafe_allow_html=True,
     )
     st.caption(f"{len(df_farm_summary)} saved record(s) across all ponds for {farm}.")
+
+    if total_expect_harvest_kg is not None:
+        st.markdown(
+            f"**🌾 Total Expect Harvest (KG) — {farm}: {total_expect_harvest_kg:,.2f} kg** "
+            "(sum of each pond's latest Expect Harvest (KG) estimate)"
+        )
 else:
     st.info(f"No saved records yet for {farm}.")
 
