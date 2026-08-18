@@ -532,6 +532,11 @@ if len(df_pond_hist_full) > 0 and "Date" in df_pond_hist_full.columns:
         prev_species = str(df_pond_hist_full.loc[latest_idx].get("Species Culture") or "").strip() or None
         prev_cycle = str(df_pond_hist_full.loc[latest_idx].get("Cycle Type") or "").strip() or None
         prev_density = to_number(df_pond_hist_full.loc[latest_idx, "Density"], as_int=True)
+        # A "Soon to be" row does not seed the DOC auto-calc chain for the
+        # next row that gets added after it — the cycle hasn't actually
+        # started yet, so there's nothing to count days-of-culture from.
+        if prev_cycle == "Soon to be":
+            prev_date, prev_doc = None, None
 
 default_species = prev_species if prev_species in SPECIES_CULTURE else SPECIES_CULTURE[0]
 default_cycle = prev_cycle if prev_cycle in CYCLE_TYPE else "Running"
@@ -689,13 +694,19 @@ def _pond_editor_fragment():
 
     def _recompute_docs(df, seed_date, seed_doc):
         """Return a copy of df with every blank DOC cell filled in, in row
-        order, using (previous row's DOC + days since previous row's Date)."""
+        order, using (previous row's DOC + days since previous row's Date).
+        A row whose Cycle Type is "Soon to be" does not seed the next
+        row's auto-calculation — the running chain is reset right after
+        such a row, so the following row needs its own DOC (or starts a
+        fresh chain from its own Date/DOC) instead of inheriting days
+        counted from a cycle that hasn't actually started yet."""
         df = df.reset_index(drop=True).copy()
         run_date, run_doc = seed_date, seed_doc
         for i in range(len(df)):
             row_date = _parse_cell_date(df.at[i, "Date"])
             if row_date is None:
                 continue
+            row_is_soon_to_be = str(df.at[i, "Cycle Type"]).strip() == "Soon to be"
             if run_date is None or run_doc is None:
                 if not _doc_is_blank(df.at[i, "DOC"]):
                     try:
@@ -703,10 +714,14 @@ def _pond_editor_fragment():
                         run_date = row_date
                     except Exception:
                         pass
+                if row_is_soon_to_be:
+                    run_date, run_doc = None, None
                 continue
             if i == 0 and not _doc_is_blank(df.at[i, "DOC"]):
                 run_doc = int(df.at[i, "DOC"])
                 run_date = row_date
+                if row_is_soon_to_be:
+                    run_date, run_doc = None, None
                 continue
             computed = int(run_doc) + (row_date - run_date).days
             if _doc_is_blank(df.at[i, "DOC"]):
@@ -719,6 +734,8 @@ def _pond_editor_fragment():
                     df.at[i, "DOC"] = computed
                     run_doc = computed
             run_date = row_date
+            if row_is_soon_to_be:
+                run_date, run_doc = None, None
         return df
 
     def _recompute_harvest_survival_row(df, i):
@@ -811,7 +828,7 @@ def _pond_editor_fragment():
         added_rows = state.get("added_rows", [])
         deleted_rows = state.get("deleted_rows", [])
 
-        RECOMPUTE_TRIGGER_COLS = ("Date", "DOC", "ABW", "Feed Per Day", "Species Culture")
+        RECOMPUTE_TRIGGER_COLS = ("Date", "DOC", "ABW", "Feed Per Day", "Species Culture", "Cycle Type")
         needs_recompute = bool(added_rows) or bool(deleted_rows) or any(
             any(col in changes for col in RECOMPUTE_TRIGGER_COLS) for changes in edited_rows.values()
         )
@@ -898,10 +915,14 @@ def _pond_editor_fragment():
             if is_saved:
                 # Already in the sheet — skip re-saving it, but keep the
                 # running DOC/Date chain going so any new rows after it
-                # auto-calculate correctly.
+                # auto-calculate correctly. A "Soon to be" row does not
+                # seed the chain for whatever row comes after it, since the
+                # cycle hasn't actually started yet.
                 doc_val = row.get("DOC")
                 if row_date is not None and not _doc_is_blank(doc_val):
                     running_prev_date, running_prev_doc = row_date, int(doc_val)
+                if str(row.get("Cycle Type") or "").strip() == "Soon to be":
+                    running_prev_date, running_prev_doc = None, None
                 continue
 
             any_new_rows = True
@@ -982,7 +1003,13 @@ def _pond_editor_fragment():
                 "Technician": technician,
             })
 
-            running_prev_date, running_prev_doc = row_date, doc_final
+            # A "Soon to be" row does not seed the DOC auto-calc chain for
+            # the next row in this same save batch — the cycle hasn't
+            # actually started yet, so there's nothing to count days from.
+            if cycle_val_row == "Soon to be":
+                running_prev_date, running_prev_doc = None, None
+            else:
+                running_prev_date, running_prev_doc = row_date, doc_final
 
         if not any_new_rows and not errors:
             errors.append("Add at least one new row before saving")
@@ -1151,8 +1178,12 @@ if len(df_farm_summary) > 0:
     # "DOC Today" = this row's saved DOC + however many days have passed
     # between its Date and today (i.e. what the DOC would be right now).
     # It's a live, always-changing number rather than something actually
-    # saved in the Sheet, so it's shown in red/bold to stand out.
+    # saved in the Sheet, so it's shown in red/bold to stand out. Rows
+    # whose Cycle Type is "Soon to be" haven't actually started yet, so
+    # DOC Today just stays 0 for them instead of counting elapsed days.
     def _compute_doc_today(row):
+        if str(row.get("Cycle Type") or "").strip() == "Soon to be":
+            return "0"
         parsed = pd.to_datetime(row.get("Date"), errors="coerce")
         if pd.isna(parsed):
             return ""
