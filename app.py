@@ -19,6 +19,12 @@ st.set_page_config(page_title="Water Quality & Harvest Report - Data Collection"
 CUSTOMER_FILE = "Customer List.xlsx"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
+# Second Google Sheet — Sales Details. Separate spreadsheet from the
+# water-quality WaterQualityData sheet above; the same service account
+# must also be shared (as Viewer or Editor) on this sheet. (Ported from
+# the manager app, which already reads this sheet.)
+SALES_SHEET_ID = "1S3csAE-E_hN8vstuHR0KkeAN7yCVQTFe4AkEVlw4vQw"
+
 # =========================================================================
 # STYLE
 # Only tables (st.dataframe) get horizontal scrolling — that's native
@@ -201,6 +207,16 @@ COLUMN_ORDER = [
     "Deleted",
 ]
 
+# Expected columns in the Sales Details Google Sheet. "Settle" holds the
+# persisted checkbox state from the recycle-bin delete control in the
+# Sales Details table below (blank or "Yes") — it's created automatically
+# in the sheet the first time a row is removed, if it doesn't already
+# exist there. (Ported from the manager app.)
+SALES_COLUMN_ORDER = [
+    "Date", "Item No.", "Item Description", "Customer Code",
+    "Customer Name", "Quantity", "Sales Amt", "Settle",
+]
+
 # Columns shown/edited in the pond spreadsheet (the rest — Customer, Farm,
 # Zone, Area, Pond, Technician, Timestamp — come from the selectors above
 # the table and are attached automatically when a row is saved).
@@ -237,6 +253,40 @@ def get_worksheet():
         ws.update("A1", [COLUMN_ORDER])
     return ws
 
+@st.cache_resource(show_spinner=False)
+def get_sales_worksheet():
+    """Separate spreadsheet (Sales Details) — same service account creds,
+    different spreadsheet key. Worksheet/tab name can be overridden via
+    st.secrets["gsheet"]["sales_worksheet_name"] (defaults to the first
+    sheet/tab in the spreadsheet if not set). (Ported from the manager
+    app.)"""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SALES_SHEET_ID)
+    worksheet_name = st.secrets.get("gsheet", {}).get("sales_worksheet_name", "")
+    if worksheet_name:
+        return sh.worksheet(worksheet_name)
+    return sh.sheet1
+
+def get_or_create_column(ws, header_name):
+    """Returns the 1-based column number of the given header in ws,
+    creating that header (in the first empty column) if it isn't there
+    yet. Used for the 'Settle' column (Sales Details sheet) written by the
+    Sales Details recycle-bin control below. Expands the sheet's column
+    count first if the new header would land past the sheet's current
+    grid width — writing past the grid is what raises gspread's
+    APIError, since the underlying Sheets API rejects it. (Ported from
+    the manager app.)"""
+    headers = ws.row_values(1)
+    if header_name in headers:
+        return headers.index(header_name) + 1
+    new_col_idx = len(headers) + 1
+    if new_col_idx > ws.col_count:
+        ws.add_cols(new_col_idx - ws.col_count)
+    ws.update_cell(1, new_col_idx, header_name)
+    return new_col_idx
+
 def _load_data_cached(data_version, sheet_id):
     # Always read fresh from the Google Sheet — no caching. This is what
     # makes edits made directly in the Google Sheet (e.g. correcting a
@@ -267,6 +317,22 @@ def load_data():
     if "Deleted" in df.columns:
         is_deleted = df["Deleted"].astype(str).str.strip().str.lower().isin(["yes", "true", "1"])
         df = df[~is_deleted].reset_index(drop=True)
+    return df
+
+def load_sales_data():
+    """Always reads fresh from the Sales Details Google Sheet (no caching),
+    same pattern as load_data() above. Also attaches each row's real sheet
+    row number (_RowNumber) so a tick in the UI can be written back to the
+    correct cell in the 'Settle' column. (Ported from the manager app.)"""
+    ws = get_sales_worksheet()
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
+    for c in SALES_COLUMN_ORDER:
+        if c not in df.columns:
+            df[c] = ""
+    df["_RowNumber"] = range(2, len(df) + 2)
+    if len(df) > 0:
+        df = df[["_RowNumber"] + SALES_COLUMN_ORDER]
     return df
 
 def mark_deleted_by_timestamp(timestamp):
@@ -454,6 +520,22 @@ if len(farm_row_match) > 0 and "Marketing Manager" in customer_df.columns:
     mm = farm_row_match.iloc[0].get("Marketing Manager", "")
     if str(mm).strip():
         st.caption(f"Marketing Manager: {mm}")
+
+# The Customer Code / Customer ID for the selected farm (used below to
+# filter the Sales Details sheet). "Customer List.xlsx" may store this
+# under any of a few likely column names — the first one that exists and
+# has a non-blank value for this row wins. (Ported from the manager app.)
+_CUSTOMER_CODE_COLUMN_CANDIDATES = [
+    "Customer Code", "Customer ID", "Customer Code with Code", "Code", "Cust Code",
+]
+selected_customer_code = ""
+if len(farm_row_match) > 0:
+    for _cand in _CUSTOMER_CODE_COLUMN_CANDIDATES:
+        if _cand in customer_df.columns:
+            _val = str(farm_row_match.iloc[0].get(_cand, "")).strip()
+            if _val and _val.lower() != "nan":
+                selected_customer_code = _val
+                break
 
 # =========================================================================
 # STEP 2: ZONE / AREA
@@ -1243,8 +1325,312 @@ if len(df_farm_summary) > 0:
             f"**🌾 Total Expect Harvest (KG) — {farm}: {total_expect_harvest_kg:,.2f} kg** "
             "(sum of each pond's latest Expect Harvest (KG) estimate)"
         )
+
+    # =========================================================================
+    # POND LAYOUT — one rectangle per Pond Number (using that pond's most
+    # recent saved record). Running / Partial H ponds show DOC Today
+    # centered inside the box; Full H ponds show "Full H" and its Harvest
+    # Date instead. (Ported from the manager app.)
+    # =========================================================================
+    if "Pond Number" in df_farm_summary.columns and "DOC Today" in df_farm_summary.columns:
+        st.markdown("---")
+        st.markdown(f"#### 🟦 Pond Layout — {farm}")
+
+        _pond_latest = (
+            df_farm_summary.assign(_PondSortDate=pd.to_datetime(df_farm_summary["Date"], errors="coerce"))
+            .dropna(subset=["_PondSortDate"])
+            .sort_values("_PondSortDate")
+            .groupby("Pond Number", as_index=False)
+            .last()
+            .sort_values("Pond Number")
+        )
+
+        def _escape_html_pond(v):
+            return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        def _pond_harvest_type(prow):
+            return str(prow.get("Harvest Type 2", "")).strip() or str(prow.get("Harvest Type", "")).strip()
+
+        # A pond keeps showing Partial H if ANY of its saved records ever
+        # had a Partial harvest — not just its most recent row (daily
+        # entries often leave Harvest Type blank after the harvest day).
+        # Full H intentionally does NOT carry forward this way — it only
+        # reflects the pond's latest record, same as before.
+        _partial_history_by_pond = (
+            df_farm_summary.assign(
+                _HasPartial=(
+                    df_farm_summary.get("Harvest Type", pd.Series("", index=df_farm_summary.index))
+                    .astype(str).str.lower().str.contains("partial")
+                    | df_farm_summary.get("Harvest Type 2", pd.Series("", index=df_farm_summary.index))
+                    .astype(str).str.lower().str.contains("partial")
+                )
+            )
+            .groupby("Pond Number")["_HasPartial"]
+            .any()
+        )
+
+        def _pond_status(prow):
+            _pond_no_status = prow.get("Pond Number", "")
+            _h_type_lower = _pond_harvest_type(prow).lower()
+            _has_partial_history = bool(_partial_history_by_pond.get(_pond_no_status, False))
+            if "full" in _h_type_lower:
+                return "Full H"
+            elif "partial" in _h_type_lower or _has_partial_history:
+                return "Partial H"
+            elif str(prow.get("Cycle Type", "")).strip() == "Soon to be":
+                return "Soon to be"
+            else:
+                return "Running"
+
+        def _pond_box_color(prow):
+            _status = _pond_status(prow)
+            if _status == "Partial H":
+                return "#fff3cd"  # yellow — Partial Harvest
+            elif _status == "Full H":
+                return "#d4edda"  # green — Full Harvest
+            elif _status == "Soon to be":
+                return "#e2e2e2"  # gray — cycle hasn't started yet
+            else:
+                return "#eaf4ff"  # default blue — no harvest yet
+
+        def _species_letter(prow):
+            _species = str(prow.get("Species Culture", "")).strip().lower()
+            if "vannamei" in _species:
+                return "V"
+            elif "monodon" in _species:
+                return "M"
+            else:
+                return ""
+
+        _pond_boxes_html = ""
+        for _, _prow in _pond_latest.iterrows():
+            _pond_no = _escape_html_pond(_prow.get("Pond Number", ""))
+            _box_color = _pond_box_color(_prow)
+            _status_box = _pond_status(_prow)
+
+            if _status_box == "Full H":
+                # Full H ponds: show "Full H" + its Harvest Date instead of DOC Today.
+                _h_date = str(_prow.get("Harvest Date 2", "")).strip() or str(_prow.get("Harvest Date", "")).strip()
+                _h_date = _escape_html_pond(_h_date or "-")
+                _box_middle_html = (
+                    "<div style='font-size:1.2rem;font-weight:bold;color:red;'>Full H</div>"
+                    f"<div style='font-size:0.75rem;color:#333;'>{_h_date}</div>"
+                )
+            elif _status_box == "Soon to be":
+                # Soon to be ponds: show "Soon to be" instead of DOC Today,
+                # matching the gray box color already assigned by
+                # _pond_box_color() for this status.
+                _box_middle_html = (
+                    "<div style='font-size:1.1rem;font-weight:bold;color:#555;'>Soon to be</div>"
+                )
+            else:
+                # Running / Partial H ponds: keep showing DOC Today, as before.
+                _doc_today_val = _escape_html_pond(_prow.get("DOC Today", "") or "-")
+                _box_middle_html = (
+                    f"<div style='font-size:1.4rem;font-weight:bold;color:red;'>{_doc_today_val}</div>"
+                    "<div style='font-size:0.7rem;color:#777;'>DOC Today</div>"
+                )
+
+            _species_label = _species_letter(_prow)
+            _species_html = (
+                f"<div style='font-size:0.75rem;font-weight:bold;color:#444;margin-top:2px;'>{_species_label}</div>"
+                if _species_label else ""
+            )
+
+            _pond_boxes_html += (
+                "<div style='display:flex;flex-direction:column;align-items:center;margin:6px;'>"
+                f"<div style='width:140px;height:90px;border:2px solid #333;border-radius:6px;"
+                "display:flex;flex-direction:column;align-items:center;justify-content:center;"
+                f"background:{_box_color};'>"
+                f"<div style='font-size:0.8rem;color:#555;'>Pond {_pond_no}</div>"
+                f"{_box_middle_html}"
+                "</div>"
+                f"{_species_html}"
+                "</div>"
+            )
+
+        st.markdown(
+            "<div style='display:flex;gap:18px;justify-content:center;margin-bottom:8px;font-size:0.85rem;'>"
+            "<div><span style='display:inline-block;width:14px;height:14px;background:#eaf4ff;"
+            "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Running</div>"
+            "<div><span style='display:inline-block;width:14px;height:14px;background:#fff3cd;"
+            "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Partial H</div>"
+            "<div><span style='display:inline-block;width:14px;height:14px;background:#d4edda;"
+            "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Full H</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"<div style='display:flex;flex-wrap:wrap;justify-content:center;'>{_pond_boxes_html}</div>",
+            unsafe_allow_html=True,
+        )
 else:
     st.info(f"No saved records yet for {farm}.")
+
+# =========================================================================
+# SALES DETAILS — read-only from the Google Sheet's perspective (nothing
+# here ever writes back to the Sales Details spreadsheet, except the
+# recycle-bin delete control below, which writes Settle = 'Yes'),
+# filtered to the Customer Code belonging to the Customer + Farm selected
+# above. Shown as individual sales line items with a per-row "Delete"
+# checkbox — checking it writes 'Yes' to the Settle column in the Google
+# Sheet, so it stays removed after a refresh. (Ported from the manager
+# app.)
+# =========================================================================
+st.markdown("---")
+st.markdown(f"#### 🧾 Sales Details — {farm}")
+
+try:
+    df_sales = load_sales_data()
+except Exception as e:
+    df_sales = None
+    st.error(f"❌ Could not connect to the Sales Details Google Sheet. Check sharing settings.\n\n{e}")
+
+if df_sales is not None:
+    if not selected_customer_code:
+        st.info(
+            "No Customer Code found for this farm in 'Customer List.xlsx', so Sales Details "
+            "can't be filtered. Add a 'Customer Code' column to the customer list to enable this."
+        )
+    elif len(df_sales) == 0:
+        st.info("No sales records found in the Sales Details sheet.")
+    else:
+        df_sales_farm = df_sales[
+            df_sales["Customer Code"].astype(str).str.strip().str.lower()
+            == selected_customer_code.strip().lower()
+        ].copy()
+
+        if len(df_sales_farm) == 0:
+            st.info(f"No sales records found for Customer Code '{selected_customer_code}'.")
+        else:
+            df_sales_farm["Quantity"] = pd.to_numeric(df_sales_farm["Quantity"], errors="coerce").fillna(0)
+            df_sales_farm["Sales Amt"] = pd.to_numeric(df_sales_farm["Sales Amt"], errors="coerce").fillna(0)
+            df_sales_farm["Settle"] = df_sales_farm["Settle"].astype(str)
+
+            # Same pivot as the manager app: one row per Date, one column
+            # per Item Description, cell value = summed Quantity for that
+            # date/item.
+            pivot_sales = df_sales_farm.pivot_table(
+                index="Date",
+                columns="Item Description",
+                values="Quantity",
+                aggfunc="sum",
+                fill_value=0,
+            )
+            pivot_sales = pivot_sales.sort_index()
+            pivot_sales.index.name = "Date"
+
+            # Dates already marked Settle = 'Yes' in the Sheet are treated
+            # as permanently removed — they're excluded before the table
+            # is even built, so a refresh doesn't bring them back.
+            _settled_by_date = (
+                df_sales_farm.groupby("Date")["Settle"]
+                .apply(lambda s: s.str.strip().str.lower().eq("yes").all())
+            )
+
+            pivot_display = pivot_sales.reset_index()
+            pivot_display = pivot_display[
+                ~pivot_display["Date"].map(_settled_by_date).fillna(False)
+            ].reset_index(drop=True)
+            sales_editor_key = f"sales_delete_editor_{selected_customer_code}"
+
+            st.caption(
+                "🗑️ Select a row's checkbox (left edge) then click the recycle-bin icon "
+                "above the table to remove that date — this writes 'Yes' to the Settle "
+                "column in the Google Sheet, so it stays removed after a refresh."
+            )
+            edited_pivot = st.data_editor(
+                pivot_display,
+                use_container_width=True,
+                hide_index=True,
+                key=sales_editor_key,
+                num_rows="dynamic",
+                disabled=list(pivot_display.columns),
+            )
+
+            # A date missing from edited_pivot was just removed via the
+            # recycle bin — mark every one of that date's line items as
+            # Settle = 'Yes' in the Sheet so the removal persists.
+            removed_dates = set(pivot_display["Date"]) - set(edited_pivot["Date"].dropna())
+            if removed_dates:
+                sales_ws = get_sales_worksheet()
+                settle_col_idx = get_or_create_column(sales_ws, "Settle")
+                for _removed_date in removed_dates:
+                    _rows_for_date = df_sales_farm[df_sales_farm["Date"] == _removed_date]
+                    for _, _r in _rows_for_date.iterrows():
+                        _current_settle = str(_r.get("Settle", "")).strip().lower()
+                        if _current_settle != "yes":
+                            sales_ws.update_cell(int(_r["_RowNumber"]), settle_col_idx, "Yes")
+                st.rerun()
+
+            kept_dates = edited_pivot["Date"].dropna()
+            _num_hidden = len(pivot_display) - len(kept_dates)
+
+            df_sales_farm_visible = df_sales_farm[df_sales_farm["Date"].isin(kept_dates)]
+
+            _caption = (
+                f"{len(df_sales_farm_visible)} sales line item(s) across "
+                f"{len(kept_dates)} date(s) for Customer Code '{selected_customer_code}'."
+            )
+            if _num_hidden:
+                _caption += f" ({_num_hidden} row(s) hidden in this view.)"
+            st.caption(_caption)
+
+            total_qty = df_sales_farm_visible["Quantity"].sum() if len(df_sales_farm_visible) else 0
+            total_amt = df_sales_farm_visible["Sales Amt"].sum() if len(df_sales_farm_visible) else 0
+            st.markdown(
+                f"**Total Quantity: {total_qty:,.0f}  |  Total Sales Amt: {total_amt:,.2f}**"
+            )
+
+            # =================================================================
+            # FEED ORDER STATUS — two rows of rectangles, one per feed size,
+            # in a fixed order: NANAMI FEED sizes, then EGO FEED sizes. Each
+            # box shows that size's total purchased Quantity in the middle
+            # and its latest purchase Date below. Boxes are colored one way
+            # if any quantity has been purchased, another if not yet.
+            # =================================================================
+            NANAMI_FEED_ORDER = [
+                "NANAMI 1", "NANAMI 1S", "NANAMI 2S", "NANAMI 3S",
+                "NANAMI 3M", "NANAMI 3L", "NANAMI 4",
+            ]
+            EGO_FEED_ORDER = [
+                "EGO - 01", "EGO - 01S", "EGO - 02S", "EGO - 03S",
+                "EGO - 03M", "EGO - 03L", "EGO - 04L",
+            ]
+
+            def _escape_html_feed(v):
+                return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+            def _render_feed_row(title, size_labels):
+                _desc_upper = df_sales_farm_visible["Item Description"].astype(str).str.strip().str.upper()
+                boxes_html = ""
+                for _label in size_labels:
+                    _subset = df_sales_farm_visible[_desc_upper == _label.upper()]
+                    _qty = _subset["Quantity"].sum() if len(_subset) else 0
+                    _latest_date = _subset["Date"].max() if len(_subset) else "-"
+                    _has_qty = _qty > 0
+                    _box_color = "#d4edda" if _has_qty else "#e2e2e2"  # green if purchased, gray if not yet
+                    _qty_label = f"{_qty:,.0f}" if _has_qty else "-"
+                    boxes_html += (
+                        "<div style='width:120px;height:80px;border:2px solid #333;border-radius:6px;"
+                        "display:flex;flex-direction:column;align-items:center;justify-content:center;"
+                        f"background:{_box_color};margin:5px;'>"
+                        f"<div style='font-size:0.7rem;color:#555;'>{_escape_html_feed(_label)}</div>"
+                        f"<div style='font-size:1.2rem;font-weight:bold;color:#111;'>{_qty_label}</div>"
+                        f"<div style='font-size:0.65rem;color:#777;'>{_escape_html_feed(_latest_date)}</div>"
+                        "</div>"
+                    )
+                st.markdown(f"**{title}**")
+                st.markdown(
+                    f"<div style='display:flex;flex-wrap:wrap;justify-content:center;'>{boxes_html}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("---")
+            _render_feed_row("🐟 NANAMI FEED", NANAMI_FEED_ORDER)
+            st.markdown("")
+            _render_feed_row("🐟 EGO FEED", EGO_FEED_ORDER)
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>",
