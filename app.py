@@ -673,6 +673,17 @@ def _pond_editor_fragment():
     editor_key = f"editor_{widget_scope}"
     working_key = f"__pond_working_{widget_scope}"
     working_sig_key = f"__pond_working_sig_{widget_scope}"
+    # Tracks how many trailing rows in `working_key` came from the widget's
+    # own `added_rows` list the last time we folded it in. `added_rows`
+    # is NOT a "what's new since last time" delta — it's Streamlit's
+    # running list of every row added since the grid was last remounted,
+    # and each entry keeps gaining fields as more of its cells are typed
+    # into. Blindly appending everything in `added_rows` on every
+    # on_change therefore appended the same new row again and again,
+    # producing duplicate saved records. This counter lets us drop the
+    # rows we appended last time and rebuild the tail fresh each time
+    # instead of stacking on top of it.
+    added_count_key = f"__pond_added_count_{widget_scope}"
 
     def _parse_cell_date(val):
         if val is None:
@@ -794,6 +805,7 @@ def _pond_editor_fragment():
     if st.session_state.get(working_sig_key) != switch_signature:
         st.session_state[working_key] = editor_df.copy()
         st.session_state[working_sig_key] = switch_signature
+        st.session_state[added_count_key] = 0
         if editor_key in st.session_state:
             del st.session_state[editor_key]
     else:
@@ -857,12 +869,25 @@ def _pond_editor_fragment():
                     if col in df.columns and col not in ("Timestamp", "Status"):
                         df.at[idx, col] = val
 
+        # `added_rows` is Streamlit's running list of new rows, not a
+        # delta since the last on_change — the same not-yet-committed row
+        # reappears here (with more fields filled in) every time another
+        # of its cells is edited. Remove whatever we appended from it on
+        # the previous run before appending the current list, so a
+        # not-yet-saved row is only ever represented once in `df` instead
+        # of accumulating a duplicate on every keystroke.
+        prev_added_len = st.session_state.get(added_count_key, 0)
+        if prev_added_len:
+            df = df.iloc[: max(0, len(df) - prev_added_len)].reset_index(drop=True)
+
         for new_row in added_rows:
             row = {c: new_row.get(c) for c in df.columns}
             row["Timestamp"] = ""  # brand-new row -> unsaved until Save is clicked
             if not isinstance(row.get("Issues"), list):
                 row["Issues"] = []
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+        st.session_state[added_count_key] = len(added_rows)
 
         for idx in sorted(deleted_rows, reverse=True):
             if idx < len(df):
@@ -873,6 +898,13 @@ def _pond_editor_fragment():
                     # from the screen — it will stay gone after a refresh.
                     mark_deleted_by_timestamp(ts)
                 df = df.drop(index=idx).reset_index(drop=True)
+                # A deleted row is gone for good — if it happened to be
+                # one of the still-pending "added" rows, don't let a
+                # later on_change try to re-append it from added_rows.
+                if idx >= len(df) - st.session_state.get(added_count_key, 0):
+                    st.session_state[added_count_key] = max(
+                        0, st.session_state.get(added_count_key, 0) - 1
+                    )
 
         if needs_recompute:
             df = _normalize_pond_dtypes(df)
@@ -933,6 +965,27 @@ def _pond_editor_fragment():
         now_base = datetime.now()
 
         rows_all = st.session_state[working_key].reset_index(drop=True)
+        # De-duplicate defensively: if, despite the added_rows fix above,
+        # more than one row in the current unsaved batch is byte-for-byte
+        # identical (every editable field the same), only keep the first
+        # occurrence — a real duplicate save should never fall through to
+        # the sheet write.
+        _saved_mask0 = rows_all["Timestamp"].astype(str).str.strip() != ""
+        _dedupe_cols = [c for c in rows_all.columns if c != "Timestamp"]
+
+        def _hashable(v):
+            return tuple(v) if isinstance(v, list) else v
+
+        _dupe_key = rows_all[~_saved_mask0][_dedupe_cols].applymap(_hashable).apply(tuple, axis=1)
+        _keep_mask = pd.Series(True, index=rows_all.index)
+        _seen = set()
+        for idx in rows_all[~_saved_mask0].index:
+            key = _dupe_key.loc[idx]
+            if key in _seen:
+                _keep_mask.loc[idx] = False
+            else:
+                _seen.add(key)
+        rows_all = rows_all[_keep_mask].reset_index(drop=True)
 
         # Process rows in chronological (Date) order rather than grid/
         # insertion order: saved rows already come pre-sorted by Date, but
@@ -1072,6 +1125,7 @@ def _pond_editor_fragment():
             st.success(f"✅ Saved {len(new_records)} new record(s) for Pond {pond_number}!")
             del st.session_state[working_key]
             del st.session_state[working_sig_key]
+            st.session_state[added_count_key] = 0
             if editor_key in st.session_state:
                 del st.session_state[editor_key]
             st.session_state[saving_flag_key] = False
