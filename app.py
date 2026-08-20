@@ -9,6 +9,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
 
+import smtplib
+from email.mime.text import MIMEText
+
 # =========================================================================
 # CONFIG
 # =========================================================================
@@ -346,6 +349,62 @@ def to_number(value, as_int=False):
         return int(float(value)) if as_int else float(value)
     except ValueError:
         return 0 if as_int else 0.0
+
+# =========================================================================
+# HARVEST ALERT EMAIL
+# Sends a "New Harvest Record Alert" email via Gmail SMTP whenever a
+# harvest (Partial H or Full H) is successfully submitted. Configured
+# through st.secrets, same pattern as the Google Sheets credentials above
+# — see the [email] block documented in the setup notice below. If it's
+# not configured, this quietly no-ops (the harvest itself still saves
+# fine) instead of blocking the save or crashing the app.
+# =========================================================================
+HARVEST_ALERT_RECIPIENT = "methmaduanjitha1@gmail.com"
+
+def _email_configured():
+    return "email" in st.secrets and "sender_email" in st.secrets["email"] and "app_password" in st.secrets["email"]
+
+def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
+                        harvest_kg="", harvest_abw="", slot=1):
+    """Best-effort email notification. Returns (success: bool, message: str)
+    so the caller can show a small status note without ever blocking or
+    failing the harvest save itself."""
+    if not _email_configured():
+        return False, "Email alerts aren't configured yet (missing [email] secrets)."
+
+    sender_email = st.secrets["email"]["sender_email"]
+    app_password = st.secrets["email"]["app_password"]
+
+    subject = f"New Harvest Record Alert - {harvest_type} - Pond {pond_number}"
+    lines = [
+        "A new harvest record has been submitted.",
+        "",
+        f"Customer: {customer}",
+        f"Farm: {farm}",
+        f"Pond Number: {pond_number}",
+        f"Harvest Type: {harvest_type}",
+        f"Harvest Date: {harvest_date}",
+    ]
+    if str(harvest_kg).strip():
+        lines.append(f"Harvest KG: {harvest_kg}")
+    if str(harvest_abw).strip():
+        lines.append(f"Harvest ABW: {harvest_abw}")
+    lines.append("")
+    lines.append("- KMN Aqua Services Water Quality Monitoring System")
+    body = "\n".join(lines)
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = HARVEST_ALERT_RECIPIENT
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, app_password)
+            server.sendmail(sender_email, [HARVEST_ALERT_RECIPIENT], msg.as_string())
+        return True, "Alert email sent."
+    except Exception as e:
+        return False, f"Could not send alert email: {e}"
 
 # =========================================================================
 # GOOGLE SHEETS SETUP CHECK
@@ -1233,6 +1292,20 @@ else:
                 f"✅ Harvest {target_slot} info saved for Pond {pond_number} — "
                 f"{harvest_date_input.isoformat()} ({harvest_type})."
             )
+            # Fire off the "New Harvest Record Alert" email. This never
+            # blocks or fails the harvest save above — if it's not
+            # configured yet, or the send fails, we just show a small
+            # note and move on.
+            _email_ok, _email_msg = send_harvest_alert(
+                customer, farm, pond_number, harvest_type,
+                harvest_date_input.isoformat(),
+                harvest_kg_input.strip(), harvest_abw_input.strip(),
+                slot=target_slot,
+            )
+            if _email_ok:
+                st.caption("📧 Alert email sent to methmaduanjitha1@gmail.com")
+            else:
+                st.caption(f"⚠️ {_email_msg}")
             time.sleep(1)
             st.rerun()
         else:
