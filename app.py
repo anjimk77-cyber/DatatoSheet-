@@ -976,11 +976,10 @@ def _pond_editor_fragment():
         def _hashable(v):
             return tuple(v) if isinstance(v, list) else v
 
-        _dupe_key = rows_all[~_saved_mask0][_dedupe_cols].applymap(_hashable).apply(tuple, axis=1)
         _keep_mask = pd.Series(True, index=rows_all.index)
         _seen = set()
-        for idx in rows_all[~_saved_mask0].index:
-            key = _dupe_key.loc[idx]
+        for idx, _r in rows_all[~_saved_mask0].iterrows():
+            key = tuple(_hashable(_r[c]) for c in _dedupe_cols)
             if key in _seen:
                 _keep_mask.loc[idx] = False
             else:
