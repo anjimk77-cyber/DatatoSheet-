@@ -693,16 +693,28 @@ def _pond_editor_fragment():
         return val is None or val == "" or (isinstance(val, float) and pd.isna(val))
 
     def _recompute_docs(df, seed_date, seed_doc):
-        """Return a copy of df with every blank DOC cell filled in, in row
-        order, using (previous row's DOC + days since previous row's Date).
-        A row whose Cycle Type is "Soon to be" does not seed the next
+        """Return a copy of df with every blank DOC cell filled in, using
+        (previous row's DOC + days since previous row's Date). Rows are
+        chained in chronological (Date) order — NOT in whatever order they
+        happen to sit in the grid — so DOC still auto-calculates correctly
+        for "the next record" even if a new row is typed in with an
+        earlier date than another still-unsaved row that was added before
+        it (e.g. catching up on a couple of missed days out of order). A
+        row whose Cycle Type is "Soon to be" does not seed the following
         row's auto-calculation — the running chain is reset right after
         such a row, so the following row needs its own DOC (or starts a
         fresh chain from its own Date/DOC) instead of inheriting days
         counted from a cycle that hasn't actually started yet."""
         df = df.reset_index(drop=True).copy()
+        # Chronological processing order (stable: ties/blank dates keep
+        # their original relative position instead of being reshuffled).
+        dated_positions = [(pos, _parse_cell_date(df.at[pos, "Date"])) for pos in range(len(df))]
+        chain_order = [pos for pos, _ in sorted(
+            dated_positions, key=lambda item: (item[1] is None, item[1])
+        )]
+        first_pos = chain_order[0] if chain_order else None
         run_date, run_doc = seed_date, seed_doc
-        for i in range(len(df)):
+        for i in chain_order:
             row_date = _parse_cell_date(df.at[i, "Date"])
             if row_date is None:
                 continue
@@ -717,7 +729,7 @@ def _pond_editor_fragment():
                 if row_is_soon_to_be:
                     run_date, run_doc = None, None
                 continue
-            if i == 0 and not _doc_is_blank(df.at[i, "DOC"]):
+            if i == first_pos and not _doc_is_blank(df.at[i, "DOC"]):
                 run_doc = int(df.at[i, "DOC"])
                 run_date = row_date
                 if row_is_soon_to_be:
@@ -888,10 +900,27 @@ def _pond_editor_fragment():
         on_change=apply_editor_changes,
     )
 
-    save_clicked = st.button("💾 Save New Records", use_container_width=True,
-                              type="primary", key=f"save_{widget_scope}")
+    saving_flag_key = f"__saving_{widget_scope}"
+    save_in_progress = st.session_state.get(saving_flag_key, False)
+    save_clicked = st.button(
+        "💾 Save New Records", use_container_width=True,
+        type="primary", key=f"save_{widget_scope}",
+        disabled=save_in_progress,
+    )
+
+    if save_clicked and save_in_progress:
+        # A save for this pond is already being processed (e.g. the person
+        # double-clicked, or clicked again during the network round-trip
+        # to Google Sheets) — ignore this second click instead of writing
+        # the same rows to the sheet twice.
+        save_clicked = False
 
     if save_clicked:
+        # Lock the button immediately so a second click while this save is
+        # still in flight (network calls to Google Sheets can take a few
+        # seconds) can't append the same new rows a second time.
+        st.session_state[saving_flag_key] = True
+
         errors = []
         if not customer or not farm or not zone or not area or not technician:
             errors.append("Please fill in all required top-level fields (marked with *)")
@@ -904,6 +933,26 @@ def _pond_editor_fragment():
         now_base = datetime.now()
 
         rows_all = st.session_state[working_key].reset_index(drop=True)
+
+        # Process rows in chronological (Date) order rather than grid/
+        # insertion order: saved rows already come pre-sorted by Date, but
+        # brand-new unsaved rows are simply appended to the bottom of the
+        # grid in whatever order they were typed. If a person enters two
+        # new rows out of date order (e.g. back-filling an earlier day
+        # after already adding a later one), DOC needs to chain off the
+        # true previous day, not off whichever row happens to sit above it
+        # on screen — otherwise DOC for that "next" row comes out wrong or
+        # never gets filled in.
+        _saved_mask = rows_all["Timestamp"].astype(str).str.strip() != ""
+        _saved_part = rows_all[_saved_mask]
+        _unsaved_part = rows_all[~_saved_mask].copy()
+        if len(_unsaved_part) > 0:
+            _unsaved_part["_sort_date"] = _unsaved_part["Date"].apply(_parse_cell_date)
+            _unsaved_part = _unsaved_part.sort_values(
+                by="_sort_date", kind="stable", na_position="last"
+            ).drop(columns=["_sort_date"])
+        rows_all = pd.concat([_saved_part, _unsaved_part], ignore_index=True)
+
         any_new_rows = False
 
         for i, row in rows_all.iterrows():
@@ -1015,6 +1064,7 @@ def _pond_editor_fragment():
             errors.append("Add at least one new row before saving")
 
         if errors:
+            st.session_state[saving_flag_key] = False
             st.error("❌ " + "  \n❌ ".join(errors))
         else:
             append_records(new_records)
@@ -1024,6 +1074,7 @@ def _pond_editor_fragment():
             del st.session_state[working_sig_key]
             if editor_key in st.session_state:
                 del st.session_state[editor_key]
+            st.session_state[saving_flag_key] = False
             time.sleep(1)
             st.rerun()
 
