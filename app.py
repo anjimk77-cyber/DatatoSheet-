@@ -364,77 +364,45 @@ HARVEST_ALERT_RECIPIENT = "methmaduanjitha1@gmail.com"
 def _email_configured():
     return "email" in st.secrets and "sender_email" in st.secrets["email"] and "app_password" in st.secrets["email"]
 
-def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
-                        harvest_kg="", harvest_abw="", slot=1):
-    """Best-effort email notification. Returns (success: bool, message: str)
-    so the caller can show a small status note without ever blocking or
-    failing the harvest save itself."""
-    if not _email_configured():
-        return False, "Email alerts aren't configured yet (missing [email] secrets)."
-
-    sender_email = st.secrets["email"]["sender_email"]
-    app_password = st.secrets["email"]["app_password"]
-
-    subject = f"New Harvest Record Alert - {harvest_type} - Pond {pond_number}"
-    lines = [
-        "A new harvest record has been submitted.",
-        "",
-        f"Customer: {customer}",
-        f"Farm: {farm}",
-        f"Pond Number: {pond_number}",
-        f"Harvest Type: {harvest_type}",
-        f"Harvest Date: {harvest_date}",
-    ]
-    if str(harvest_kg).strip():
-        lines.append(f"Harvest KG: {harvest_kg}")
-    if str(harvest_abw).strip():
-        lines.append(f"Harvest ABW: {harvest_abw}")
-    lines.append("")
-    lines.append("- KMN Aqua Services Water Quality Monitoring System")
-    body = "\n".join(lines)
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender_email
-    msg["To"] = HARVEST_ALERT_RECIPIENT
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, app_password)
-            server.sendmail(sender_email, [HARVEST_ALERT_RECIPIENT], msg.as_string())
-        return True, "Alert email sent."
-    except Exception as e:
-        return False, f"Could not send alert email: {e}"
-
-# =========================================================================
-# MANAGER SUMMARY REPORT EMAIL
-# New, additive feature: a "Pond Status Summary" email for managers, listing
-# how many ponds on the selected farm are still running (no harvest yet)
-# and how many are partially harvested (a Partial H was recorded but no
-# Full H yet), plus each of those ponds' live DOC Today value. Reuses the
-# same Gmail SMTP secrets ([email] sender_email / app_password) as the
-# harvest alert above. Nothing else in the file is touched by this section.
-# =========================================================================
-MANAGER_REPORT_RECIPIENTS = ["methmaduanjitha1@gmail.com"]  # TODO: add/replace manager email address(es) here
-
-def _build_pond_status_summary(df_farm):
-    """Given a farm's saved records (already including a 'DOC Today'
-    column), returns (still_running, partial_harvest) — two lists of
-    {"pond": ..., "doc_today": ...} dicts, one entry per pond, based on
-    each pond's MOST RECENT saved record:
+def _farm_pond_status_summary(customer, farm):
+    """Internal helper for the harvest alert email only (not used anywhere
+    else in the app). Loads this Customer + Farm's saved records fresh from
+    the Google Sheet, computes each row's live DOC Today, and returns
+    (still_running, partial_harvest) — two lists of {"pond", "doc_today"}
+    dicts, one entry per pond, based on each pond's MOST RECENT saved
+    record:
       - still_running: no Harvest Type recorded in either slot yet.
-      - partial_harvest: Harvest Type "Partial H" recorded in slot 1 or 2,
-        but no "Full H" recorded in either slot yet.
-    A pond that already has a "Full H" recorded is excluded from both
-    lists (it's fully harvested, no longer running or pending)."""
+      - partial_harvest: "Partial H" recorded in slot 1 or 2, but no
+        "Full H" recorded in either slot yet.
+    A pond that already has a "Full H" recorded is excluded from both."""
     still_running, partial_harvest = [], []
-    if len(df_farm) == 0 or "Pond Number" not in df_farm.columns:
+    df = load_data()
+    required = {"Customer", "Farm Name with Code", "Pond Number", "Date"}
+    if len(df) == 0 or not required.issubset(df.columns):
+        return still_running, partial_harvest
+    df = df[(df["Customer"] == customer) & (df["Farm Name with Code"] == farm)].copy()
+    if len(df) == 0:
         return still_running, partial_harvest
 
-    work = df_farm.copy()
-    work["_ParsedDate"] = pd.to_datetime(work["Date"], errors="coerce")
+    df["_ParsedDate"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    def _doc_today_for_row(row):
+        if str(row.get("Cycle Type") or "").strip() == "Soon to be":
+            return "0"
+        parsed = row.get("_ParsedDate")
+        if pd.isna(parsed):
+            return ""
+        try:
+            doc_num = int(float(row.get("DOC")))
+        except (TypeError, ValueError):
+            return ""
+        days_passed = (pd.Timestamp(date.today()) - parsed).days
+        return str(doc_num + days_passed)
+
+    df["DOC Today"] = df.apply(_doc_today_for_row, axis=1)
+
     latest_per_pond = (
-        work.dropna(subset=["_ParsedDate"])
+        df.dropna(subset=["_ParsedDate"])
         .sort_values("_ParsedDate")
         .groupby("Pond Number", as_index=False)
         .last()
@@ -461,58 +429,67 @@ def _build_pond_status_summary(df_farm):
 
     return still_running, partial_harvest
 
-def send_manager_summary_report(customer, farm, still_running, partial_harvest):
-    """Best-effort email notification, same pattern as send_harvest_alert
-    above. Returns (success: bool, message: str)."""
+def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
+                        harvest_kg="", harvest_abw="", slot=1):
+    """Best-effort email notification, sent only when a new Full H or
+    Partial H harvest record is submitted (see the Harvest Details submit
+    button below — this is the only place this function is called from).
+    Returns (success: bool, message: str) so the caller can show a small
+    status note without ever blocking or failing the harvest save itself."""
     if not _email_configured():
         return False, "Email alerts aren't configured yet (missing [email] secrets)."
-    if not MANAGER_REPORT_RECIPIENTS:
-        return False, "No manager recipient email addresses are configured."
 
     sender_email = st.secrets["email"]["sender_email"]
     app_password = st.secrets["email"]["app_password"]
 
-    today_str = date.today().strftime("%d %B %Y")
-    subject = f"Pond Status Summary - {farm} - {today_str}"
-
+    subject = f"New Harvest Record Alert - {harvest_type} - Pond {pond_number}"
     lines = [
-        "Dear Manager,",
+        "A new harvest record has been submitted.",
         "",
-        f"Please find below the pond status summary for {farm} ({customer}) as of {today_str}.",
-        "",
-        f"Still Running Ponds: {len(still_running)}",
-        f"Partially Harvested Ponds (awaiting Full Harvest): {len(partial_harvest)}",
-        "",
+        "Harvest Record Details:",
+        f"Customer: {customer}",
+        f"Farm: {farm}",
+        f"Pond Number: {pond_number}",
+        f"Harvest Type: {harvest_type}",
+        f"Harvest Date: {harvest_date}",
     ]
+    if str(harvest_kg).strip():
+        lines.append(f"Harvest KG: {harvest_kg}")
+    if str(harvest_abw).strip():
+        lines.append(f"Harvest ABW: {harvest_abw}")
 
+    still_running, partial_harvest = _farm_pond_status_summary(customer, farm)
+    lines.append("")
+    lines.append(f"Farm Status Summary - {farm}:")
+    lines.append(f"Still Running Ponds: {len(still_running)}")
+    lines.append(f"Partially Harvested Ponds (awaiting Full Harvest): {len(partial_harvest)}")
     if still_running:
+        lines.append("")
         lines.append("Still Running - Pond No. (DOC Today):")
         for item in still_running:
             lines.append(f"  - Pond {item['pond']}: DOC Today {item['doc_today']}")
-        lines.append("")
-
     if partial_harvest:
+        lines.append("")
         lines.append("Partially Harvested, No Full Harvest Yet - Pond No. (DOC Today):")
         for item in partial_harvest:
             lines.append(f"  - Pond {item['pond']}: DOC Today {item['doc_today']}")
-        lines.append("")
 
-    lines.append("Best regards,")
-    lines.append("KMN Aqua Services - Water Quality & Harvest Details Monitoring System")
+    lines.append("")
+    lines.append("- KMN Aqua Services Water Quality & Harvest Details Monitoring System")
     body = "\n".join(lines)
 
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = sender_email
-    msg["To"] = ", ".join(MANAGER_REPORT_RECIPIENTS)
+    msg["To"] = HARVEST_ALERT_RECIPIENT
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, app_password)
-            server.sendmail(sender_email, MANAGER_REPORT_RECIPIENTS, msg.as_string())
-        return True, "Summary report email sent."
+            server.sendmail(sender_email, [HARVEST_ALERT_RECIPIENT], msg.as_string())
+        return True, "Alert email sent."
     except Exception as e:
-        return False, f"Could not send summary report email: {e}"
+        return False, f"Could not send alert email: {e}"
 
 # =========================================================================
 # GOOGLE SHEETS SETUP CHECK
@@ -1528,47 +1505,6 @@ if len(df_farm_summary) > 0:
             f"**🌾 Total Expect Harvest (KG) — {farm}: {total_expect_harvest_kg:,.2f} kg** "
             "(sum of each pond's latest Expect Harvest (KG) estimate)"
         )
-
-    # =====================================================================
-    # MANAGER SUMMARY REPORT — new, additive section. Uses df_farm_summary
-    # (already scoped to this Customer + Farm, with "DOC Today" already
-    # computed above) to count/list ponds that are still running vs.
-    # partially harvested, and lets the user email that summary to
-    # managers. Nothing above this is changed.
-    # =====================================================================
-    st.markdown("---")
-    st.markdown("##### 📧 Manager Summary Report")
-
-    _still_running, _partial_harvest = _build_pond_status_summary(df_farm_summary)
-
-    _mrep_col1, _mrep_col2 = st.columns(2)
-    with _mrep_col1:
-        st.metric("🟢 Still Running Ponds", len(_still_running))
-    with _mrep_col2:
-        st.metric("🟡 Partial Harvested (No Full H)", len(_partial_harvest))
-
-    if _still_running:
-        st.caption("**Still Running** — Pond (DOC Today): " +
-                   ", ".join(f"{it['pond']} ({it['doc_today']})" for it in _still_running))
-    if _partial_harvest:
-        st.caption("**Partial Harvested, No Full H yet** — Pond (DOC Today): " +
-                   ", ".join(f"{it['pond']} ({it['doc_today']})" for it in _partial_harvest))
-
-    # Auto-send (no button): fires once per Customer+Farm+day. A guard flag
-    # in session_state stops it from re-sending again on every rerun of the
-    # script (which Streamlit does on almost every interaction) — it only
-    # actually emails the first time this farm's summary is computed each
-    # calendar day within a running session.
-    _mrep_sent_key = f"__mgr_report_sent_{customer}_{farm}_{date.today().isoformat()}"
-    if not st.session_state.get(_mrep_sent_key, False):
-        _mrep_ok, _mrep_msg = send_manager_summary_report(
-            customer, farm, _still_running, _partial_harvest
-        )
-        st.session_state[_mrep_sent_key] = True
-        if _mrep_ok:
-            st.caption(f"📧 {_mrep_msg}")
-        else:
-            st.caption(f"⚠️ {_mrep_msg}")
 else:
     st.info(f"No saved records yet for {farm}.")
 
