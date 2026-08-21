@@ -369,12 +369,21 @@ def _farm_pond_status_summary(customer, farm):
     else in the app). Loads this Customer + Farm's saved records fresh from
     the Google Sheet, computes each row's live DOC Today, and returns
     (still_running, partial_harvest) — two lists of {"pond", "doc_today"}
-    dicts, one entry per pond, based on each pond's MOST RECENT saved
-    record:
-      - still_running: no Harvest Type recorded in either slot yet.
-      - partial_harvest: "Partial H" recorded in slot 1 or 2, but no
-        "Full H" recorded in either slot yet.
-    A pond that already has a "Full H" recorded is excluded from both."""
+    dicts, one entry per pond:
+      - still_running: no Harvest Type recorded on that pond's LATEST
+        saved row (in either slot) yet.
+      - partial_harvest: "Partial H" recorded in slot 1 or 2 of ANY of
+        that pond's saved rows, and no "Full H" recorded on that pond's
+        latest row.
+    Partial H is checked across ALL of a pond's saved rows, not just its
+    latest one — a harvest is written onto whichever row happened to be
+    "latest" at the moment it was submitted, and that row is no longer
+    the pond's latest once a newer water-quality row gets added
+    afterwards, so checking only the latest row was missing
+    already-recorded Partial H's. Full H detection is intentionally left
+    checking only the pond's latest row (unchanged/original behavior) —
+    this all-rows fix applies to Partial H only. DOC Today is taken from
+    the pond's most recent row."""
     still_running, partial_harvest = [], []
     df = load_data()
     required = {"Customer", "Farm Name with Code", "Pond Number", "Date"}
@@ -408,17 +417,26 @@ def _farm_pond_status_summary(customer, farm):
         .last()
     )
 
-    for _, row in latest_per_pond.iterrows():
-        pond = str(row.get("Pond Number") or "").strip()
+    for _, latest_row in latest_per_pond.iterrows():
+        pond = str(latest_row.get("Pond Number") or "").strip()
         if not pond:
             continue
-        doc_today = str(row.get("DOC Today") or "").strip()
+        doc_today = str(latest_row.get("DOC Today") or "").strip()
 
-        h1_type = str(row.get("Harvest Type") or "").strip()
-        h2_type = str(row.get("Harvest Type 2") or "").strip()
-        has_full = (h1_type == "Full H") or (h2_type == "Full H")
-        has_partial = (h1_type == "Partial H") or (h2_type == "Partial H")
-        has_any_harvest = bool(h1_type or h2_type)
+        # Full H: only checked on the pond's latest row (unchanged/original
+        # behavior).
+        latest_h1 = str(latest_row.get("Harvest Type") or "").strip()
+        latest_h2 = str(latest_row.get("Harvest Type 2") or "").strip()
+        has_full = (latest_h1 == "Full H") or (latest_h2 == "Full H")
+        has_any_harvest = bool(latest_h1 or latest_h2)
+
+        # Partial H: checked across EVERY saved row for this pond, since a
+        # Partial H can be written onto an earlier row that's no longer
+        # the pond's latest once a newer water-quality row gets added.
+        pond_rows = df[df["Pond Number"] == pond]
+        h1_vals = pond_rows.get("Harvest Type", pd.Series(dtype=str)).astype(str).str.strip()
+        h2_vals = pond_rows.get("Harvest Type 2", pd.Series(dtype=str)).astype(str).str.strip()
+        has_partial = (h1_vals == "Partial H").any() or (h2_vals == "Partial H").any()
 
         if has_full:
             continue
