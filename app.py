@@ -501,12 +501,12 @@ def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = sender_email
-    msg["To"] = HARVEST_ALERT_RECIPIENT
+    msg["To"] = ", ".join(HARVEST_ALERT_RECIPIENT)
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, app_password)
-            server.sendmail(sender_email, [HARVEST_ALERT_RECIPIENT], msg.as_string())
+            server.sendmail(sender_email, HARVEST_ALERT_RECIPIENT, msg.as_string())
         return True, "Alert email sent."
     except Exception as e:
         return False, f"Could not send alert email: {e}"
@@ -1408,7 +1408,7 @@ else:
                 slot=target_slot,
             )
             if _email_ok:
-                st.caption("📧 Alert email sent to methmaduanjitha1@gmail.com")
+                st.caption(f"📧 Alert email sent to {', '.join(HARVEST_ALERT_RECIPIENT)}")
             else:
                 st.caption(f"⚠️ {_email_msg}")
             time.sleep(1)
