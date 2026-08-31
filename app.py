@@ -1,5 +1,7 @@
 import uuid
 import time
+import base64
+import requests
 import pandas as pd
 import streamlit as st
 from datetime import datetime, date
@@ -11,12 +13,6 @@ from gspread.utils import rowcol_to_a1
 
 import smtplib
 from email.mime.text import MIMEText
-
-# Google Drive API (used to upload Competitor Details images so we can
-# store a link to them in the Google Sheet — Sheets cells can't hold
-# binary image data directly).
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 
 # =========================================================================
 # CONFIG
@@ -426,62 +422,62 @@ def to_number(value, as_int=False):
         return 0 if as_int else 0.0
 
 # =========================================================================
-# IMAGE UPLOAD (GOOGLE DRIVE)
+# IMAGE UPLOAD (imgbb)
 # Used by the Competitor Details section to store multiple uploaded images.
-# Google Sheets cells can't hold binary data, so each image is uploaded to
-# Google Drive (via the same service account already used for Sheets —
-# SCOPES above already includes the Drive scope) and the resulting
-# shareable link is what actually gets written into the sheet cell.
+# Google Sheets cells can't hold binary data, and Google service accounts
+# don't get their own Drive storage quota (uploading as the service
+# account fails with "storageQuotaExceeded", and Shared Drives require a
+# paid Google Workspace plan) — so images are instead uploaded to imgbb
+# (https://imgbb.com), a free image-hosting service with a simple API and
+# no billing/Workspace requirement. The resulting public image URL is what
+# actually gets written into the sheet cell.
 #
-# Optional secret: [gsheet] drive_folder_id = "..." — a Drive folder ID
-# that has been shared with the service account's client_email as Editor.
-# If provided, uploads go into that folder; if not, they upload to the
-# service account's own Drive space. Sharing a folder from a normal
-# Google account (or a Shared Drive) is recommended so the images count
-# against a real Drive quota and are easy to browse.
+# Required secret: [imgbb] api_key = "..." — get a free key at
+# https://api.imgbb.com/ (sign in, click "Get API key"). Without it, image
+# uploads are skipped (a warning is shown) but the rest of the Competitor
+# Details record still saves fine.
 # =========================================================================
-@st.cache_resource(show_spinner=False)
-def get_drive_service():
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return build("drive", "v3", credentials=creds)
+IMGBB_UPLOAD_URL = "https://api.imgbb.com/1/upload"
 
-def upload_image_to_drive(uploaded_file):
-    """Uploads a single st.file_uploader file to Google Drive, makes it
-    link-viewable, and returns a shareable link — or None (with a small
-    warning shown) if the upload didn't succeed. Never raises, so a failed
-    image upload can't block saving the rest of the Competitor Details
-    record."""
-    try:
-        service = get_drive_service()
-        folder_id = st.secrets.get("gsheet", {}).get("drive_folder_id", "")
-        file_metadata = {"name": uploaded_file.name}
-        if folder_id:
-            file_metadata["parents"] = [folder_id]
-        media = MediaIoBaseUpload(
-            BytesIO(uploaded_file.getvalue()),
-            mimetype=uploaded_file.type or "application/octet-stream",
-            resumable=False,
+def _imgbb_configured():
+    return "imgbb" in st.secrets and "api_key" in st.secrets["imgbb"]
+
+def upload_image(uploaded_file):
+    """Uploads a single st.file_uploader file to imgbb and returns its
+    public image URL — or None (with a small warning shown) if the upload
+    didn't succeed. Never raises, so a failed image upload can't block
+    saving the rest of the Competitor Details record."""
+    if not _imgbb_configured():
+        st.warning(
+            f"⚠️ Image hosting isn't configured yet (missing [imgbb] api_key in secrets) — "
+            f"'{uploaded_file.name}' was not uploaded."
         )
-        uploaded = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        file_id = uploaded.get("id")
-        if not file_id:
-            return None
-        service.permissions().create(
-            fileId=file_id, body={"role": "reader", "type": "anyone"}
-        ).execute()
-        return f"https://drive.google.com/uc?id={file_id}"
+        return None
+    try:
+        api_key = st.secrets["imgbb"]["api_key"]
+        b64_data = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+        resp = requests.post(
+            IMGBB_UPLOAD_URL,
+            data={"key": api_key, "image": b64_data, "name": uploaded_file.name},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("success") and payload.get("data", {}).get("url"):
+            return payload["data"]["url"]
+        st.warning(f"⚠️ Could not upload image '{uploaded_file.name}': {payload}")
+        return None
     except Exception as e:
         st.warning(f"⚠️ Could not upload image '{uploaded_file.name}': {e}")
         return None
 
-def upload_images_to_drive(uploaded_files):
+def upload_images(uploaded_files):
     """Uploads every file in uploaded_files (a list from a multi-file
-    st.file_uploader) and returns the list of shareable links that
-    actually succeeded."""
+    st.file_uploader) and returns the list of public URLs that actually
+    succeeded."""
     links = []
     for f in (uploaded_files or []):
-        link = upload_image_to_drive(f)
+        link = upload_image(f)
         if link:
             links.append(link)
     return links
@@ -777,11 +773,12 @@ if not _gsheet_configured():
             '# Optional — separate tabs for the Competitor / Return sections;\n'
             '# they default to these names if not set:\n'
             'competitor_worksheet_name = "CompetitorDetails"\n'
-            'return_worksheet_name = "ReturnDetails"\n'
-            '# Optional — a Drive folder ID (shared as Editor with the service\n'
-            '# account) to upload Competitor Details images into. If omitted,\n'
-            '# images upload to the service account'"'"'s own Drive space.\n'
-            'drive_folder_id = ""\n',
+            'return_worksheet_name = "ReturnDetails"\n\n'
+            '[imgbb]\n'
+            '# Required for Competitor Details image uploads — free key from\n'
+            '# https://api.imgbb.com/ (Google service accounts have no Drive\n'
+            '# storage quota of their own, so images are hosted on imgbb instead).\n'
+            'api_key = "..."\n',
             language="toml",
         )
     st.stop()
@@ -1706,7 +1703,7 @@ if st.button("✅ Submit Competitor Details", key=f"competitor_submit_{comp_scop
         st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
     else:
         with st.spinner("Saving Competitor Details..."):
-            image_links = upload_images_to_drive(competitor_images)
+            image_links = upload_images(competitor_images)
             competitor_record = {
                 "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
                 "Customer": customer,
