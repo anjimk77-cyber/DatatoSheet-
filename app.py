@@ -12,12 +12,6 @@ from gspread.utils import rowcol_to_a1
 import smtplib
 from email.mime.text import MIMEText
 
-# Google Drive API (used to upload Competitor Details images so we can
-# store a link to them in the Google Sheet — Sheets cells can't hold
-# binary image data directly).
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-
 # =========================================================================
 # CONFIG
 # =========================================================================
@@ -218,21 +212,6 @@ POND_COLS = ["Date", "DOC", "Species Culture", "Density", "Feed Per Day", "ABW",
              "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
 
 # =========================================================================
-# COMPETITOR DETAILS / RETURN DETAILS — column layouts for their own
-# Google Sheet tabs (kept separate from the main Pond Details tab since
-# these are farm-level records, not per-pond ones).
-# =========================================================================
-COMPETITOR_COLUMN_ORDER = [
-    "Timestamp", "Customer", "Farm Name with Code", "Zone", "Area", "Technician",
-    "Date", "Competitor Feeds", "Competitor Health Care Products", "Image Links",
-]
-
-RETURN_COLUMN_ORDER = [
-    "Timestamp", "Customer", "Farm Name with Code", "Zone", "Area", "Technician",
-    "Date", "Remark",
-]
-
-# =========================================================================
 # GOOGLE SHEETS BACKEND
 # =========================================================================
 def _gsheet_configured():
@@ -259,48 +238,6 @@ def get_worksheet():
     header = ws.row_values(1)
     if header != COLUMN_ORDER:
         ws.update("A1", [COLUMN_ORDER])
-    return ws
-
-@st.cache_resource(show_spinner=False)
-def get_competitor_worksheet():
-    """Separate tab ('CompetitorDetails' by default) for the Competitor
-    Details section — created/self-healed the same way as the main
-    worksheet above, but with its own column layout."""
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sheet_id = st.secrets["gsheet"]["sheet_id"]
-    worksheet_name = st.secrets["gsheet"].get("competitor_worksheet_name", "CompetitorDetails")
-    sh = client.open_by_key(sheet_id)
-    try:
-        ws = sh.worksheet(worksheet_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=len(COMPETITOR_COLUMN_ORDER) + 2)
-        ws.append_row(COMPETITOR_COLUMN_ORDER, value_input_option="USER_ENTERED")
-    header = ws.row_values(1)
-    if header != COMPETITOR_COLUMN_ORDER:
-        ws.update("A1", [COMPETITOR_COLUMN_ORDER])
-    return ws
-
-@st.cache_resource(show_spinner=False)
-def get_return_worksheet():
-    """Separate tab ('ReturnDetails' by default) for the Return Details
-    section — created/self-healed the same way as the main worksheet
-    above, but with its own column layout."""
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sheet_id = st.secrets["gsheet"]["sheet_id"]
-    worksheet_name = st.secrets["gsheet"].get("return_worksheet_name", "ReturnDetails")
-    sh = client.open_by_key(sheet_id)
-    try:
-        ws = sh.worksheet(worksheet_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=len(RETURN_COLUMN_ORDER) + 2)
-        ws.append_row(RETURN_COLUMN_ORDER, value_input_option="USER_ENTERED")
-    header = ws.row_values(1)
-    if header != RETURN_COLUMN_ORDER:
-        ws.update("A1", [RETURN_COLUMN_ORDER])
     return ws
 
 def _load_data_cached(data_version, sheet_id):
@@ -386,18 +323,6 @@ def append_records(records):
     ws.append_rows(rows, value_input_option="USER_ENTERED")
     bump_data_version()
 
-def append_competitor_record(record):
-    """Appends one row to the CompetitorDetails tab."""
-    ws = get_competitor_worksheet()
-    row = [str(record.get(c, "")) for c in COMPETITOR_COLUMN_ORDER]
-    ws.append_row(row, value_input_option="USER_ENTERED")
-
-def append_return_record(record):
-    """Appends one row to the ReturnDetails tab."""
-    ws = get_return_worksheet()
-    row = [str(record.get(c, "")) for c in RETURN_COLUMN_ORDER]
-    ws.append_row(row, value_input_option="USER_ENTERED")
-
 def update_record_by_timestamp(timestamp, record):
     ws = get_worksheet()
     cell = ws.find(str(timestamp), in_column=1)
@@ -424,67 +349,6 @@ def to_number(value, as_int=False):
         return int(float(value)) if as_int else float(value)
     except ValueError:
         return 0 if as_int else 0.0
-
-# =========================================================================
-# IMAGE UPLOAD (GOOGLE DRIVE)
-# Used by the Competitor Details section to store multiple uploaded images.
-# Google Sheets cells can't hold binary data, so each image is uploaded to
-# Google Drive (via the same service account already used for Sheets —
-# SCOPES above already includes the Drive scope) and the resulting
-# shareable link is what actually gets written into the sheet cell.
-#
-# Optional secret: [gsheet] drive_folder_id = "..." — a Drive folder ID
-# that has been shared with the service account's client_email as Editor.
-# If provided, uploads go into that folder; if not, they upload to the
-# service account's own Drive space. Sharing a folder from a normal
-# Google account (or a Shared Drive) is recommended so the images count
-# against a real Drive quota and are easy to browse.
-# =========================================================================
-@st.cache_resource(show_spinner=False)
-def get_drive_service():
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return build("drive", "v3", credentials=creds)
-
-def upload_image_to_drive(uploaded_file):
-    """Uploads a single st.file_uploader file to Google Drive, makes it
-    link-viewable, and returns a shareable link — or None (with a small
-    warning shown) if the upload didn't succeed. Never raises, so a failed
-    image upload can't block saving the rest of the Competitor Details
-    record."""
-    try:
-        service = get_drive_service()
-        folder_id = st.secrets.get("gsheet", {}).get("drive_folder_id", "")
-        file_metadata = {"name": uploaded_file.name}
-        if folder_id:
-            file_metadata["parents"] = [folder_id]
-        media = MediaIoBaseUpload(
-            BytesIO(uploaded_file.getvalue()),
-            mimetype=uploaded_file.type or "application/octet-stream",
-            resumable=False,
-        )
-        uploaded = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        file_id = uploaded.get("id")
-        if not file_id:
-            return None
-        service.permissions().create(
-            fileId=file_id, body={"role": "reader", "type": "anyone"}
-        ).execute()
-        return f"https://drive.google.com/uc?id={file_id}"
-    except Exception as e:
-        st.warning(f"⚠️ Could not upload image '{uploaded_file.name}': {e}")
-        return None
-
-def upload_images_to_drive(uploaded_files):
-    """Uploads every file in uploaded_files (a list from a multi-file
-    st.file_uploader) and returns the list of shareable links that
-    actually succeeded."""
-    links = []
-    for f in (uploaded_files or []):
-        link = upload_image_to_drive(f)
-        if link:
-            links.append(link)
-    return links
 
 # =========================================================================
 # HARVEST ALERT EMAIL
@@ -648,104 +512,6 @@ def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
         return False, f"Could not send alert email: {e}"
 
 # =========================================================================
-# COMPETITOR DETAILS ALERT EMAIL
-# Sends a "Competitor Product Detective Alert" email whenever a Competitor
-# Details record is submitted. Same best-effort pattern as the harvest
-# alert above — never blocks or fails the save itself.
-# =========================================================================
-COMPETITOR_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
-
-def send_competitor_alert(customer, farm, zone, area, technician, comp_date,
-                           competitor_feeds, competitor_health, image_links):
-    if not _email_configured():
-        return False, "Email alerts aren't configured yet (missing [email] secrets)."
-
-    sender_email = st.secrets["email"]["sender_email"]
-    app_password = st.secrets["email"]["app_password"]
-
-    subject = f"Competitor Product Detective Alert - {farm}"
-    lines = [
-        "A new Competitor Details record has been submitted.",
-        "",
-        "Competitor Details:",
-        f"Customer: {customer}",
-        f"Farm: {farm}",
-        f"Zone: {zone}",
-        f"Area: {area}",
-        f"Technician: {technician}",
-        f"Date: {comp_date}",
-        f"Competitor Feeds: {competitor_feeds}",
-        f"Competitor Health Care Products: {competitor_health}",
-    ]
-    if image_links:
-        lines.append(f"Images Attached: {len(image_links)}")
-        for link in image_links:
-            lines.append(f"  - {link}")
-    else:
-        lines.append("Images Attached: None")
-
-    lines.append("")
-    lines.append("- KMN Aqua Services Water Quality & Harvest Details Monitoring System")
-    body = "\n".join(lines)
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender_email
-    msg["To"] = ", ".join(COMPETITOR_ALERT_RECIPIENTS)
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, app_password)
-            server.sendmail(sender_email, COMPETITOR_ALERT_RECIPIENTS, msg.as_string())
-        return True, "Alert email sent."
-    except Exception as e:
-        return False, f"Could not send alert email: {e}"
-
-# =========================================================================
-# RETURN DETAILS ALERT EMAIL
-# Sends a "Return Available Alert" email whenever a Return Details record
-# is submitted. Same best-effort pattern as the other alerts above.
-# =========================================================================
-RETURN_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
-
-def send_return_alert(customer, farm, zone, area, technician, return_date, remark):
-    if not _email_configured():
-        return False, "Email alerts aren't configured yet (missing [email] secrets)."
-
-    sender_email = st.secrets["email"]["sender_email"]
-    app_password = st.secrets["email"]["app_password"]
-
-    subject = f"Return Available Alert - {farm}"
-    lines = [
-        "A new Return Details record has been submitted.",
-        "",
-        "Return Details:",
-        f"Customer: {customer}",
-        f"Farm: {farm}",
-        f"Zone: {zone}",
-        f"Area: {area}",
-        f"Technician: {technician}",
-        f"Date: {return_date}",
-        f"Remark: {remark}" if str(remark).strip() else "Remark: (none)",
-        "",
-        "- KMN Aqua Services Water Quality & Harvest Details Monitoring System",
-    ]
-    body = "\n".join(lines)
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender_email
-    msg["To"] = ", ".join(RETURN_ALERT_RECIPIENTS)
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, app_password)
-            server.sendmail(sender_email, RETURN_ALERT_RECIPIENTS, msg.as_string())
-        return True, "Alert email sent."
-    except Exception as e:
-        return False, f"Could not send alert email: {e}"
-
-# =========================================================================
 # GOOGLE SHEETS SETUP CHECK
 # =========================================================================
 if not _gsheet_configured():
@@ -773,15 +539,7 @@ if not _gsheet_configured():
             'client_x509_cert_url = "..."\n\n'
             '[gsheet]\n'
             'sheet_id = "the-id-from-the-sheet-url"\n'
-            'worksheet_name = "WaterQualityData"\n'
-            '# Optional — separate tabs for the Competitor / Return sections;\n'
-            '# they default to these names if not set:\n'
-            'competitor_worksheet_name = "CompetitorDetails"\n'
-            'return_worksheet_name = "ReturnDetails"\n'
-            '# Optional — a Drive folder ID (shared as Editor with the service\n'
-            '# account) to upload Competitor Details images into. If omitted,\n'
-            '# images upload to the service account'"'"'s own Drive space.\n'
-            'drive_folder_id = ""\n',
+            'worksheet_name = "WaterQualityData"\n',
             language="toml",
         )
     st.stop()
@@ -1657,127 +1415,6 @@ else:
             st.rerun()
         else:
             st.error("❌ Could not find that record in the Google Sheet.")
-
-# =========================================================================
-# STEP 6: COMPETITOR DETAILS — Date, a Yes/No toggle each for Competitor
-# Feeds and Competitor Health Care Products, plus optional multiple image
-# uploads. This is farm-level info (not tied to a specific pond), so it's
-# keyed off Customer + Farm rather than the currently selected pond, and
-# is saved to its own "CompetitorDetails" Google Sheet tab. Submitting
-# fires a separate "Competitor Product Detective Alert" email.
-# =========================================================================
-st.markdown("---")
-st.markdown("#### 🕵️ Competitor Details")
-
-comp_scope = f"{customer}_{farm}"
-
-cd_col1, cd_col2 = st.columns(2)
-with cd_col1:
-    competitor_date_input = st.date_input(
-        "Date *", value=date.today(), key=f"competitor_date_{comp_scope}",
-    )
-with cd_col2:
-    st.caption(f"Customer: {customer}  \nFarm: {farm}")
-
-cd_col3, cd_col4 = st.columns(2)
-with cd_col3:
-    competitor_feeds_toggle = st.toggle(
-        "Competitor Feeds", value=False, key=f"competitor_feeds_{comp_scope}",
-        help="Toggle ON for Yes, OFF for No",
-    )
-with cd_col4:
-    competitor_health_toggle = st.toggle(
-        "Competitor Health Care Products", value=False, key=f"competitor_health_{comp_scope}",
-        help="Toggle ON for Yes, OFF for No",
-    )
-
-competitor_feeds_val = "Yes" if competitor_feeds_toggle else "No"
-competitor_health_val = "Yes" if competitor_health_toggle else "No"
-
-competitor_images = st.file_uploader(
-    "Upload Images (optional, multiple allowed)",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
-    key=f"competitor_images_{comp_scope}",
-)
-
-if st.button("✅ Submit Competitor Details", key=f"competitor_submit_{comp_scope}"):
-    if not customer or not farm or not zone or not area or not technician:
-        st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
-    else:
-        with st.spinner("Saving Competitor Details..."):
-            image_links = upload_images_to_drive(competitor_images)
-            competitor_record = {
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                "Customer": customer,
-                "Farm Name with Code": farm,
-                "Zone": zone,
-                "Area": area,
-                "Technician": technician,
-                "Date": competitor_date_input.isoformat(),
-                "Competitor Feeds": competitor_feeds_val,
-                "Competitor Health Care Products": competitor_health_val,
-                "Image Links": ", ".join(image_links),
-            }
-            append_competitor_record(competitor_record)
-        st.success("✅ Competitor Details saved!")
-        _comp_ok, _comp_msg = send_competitor_alert(
-            customer, farm, zone, area, technician,
-            competitor_date_input.isoformat(),
-            competitor_feeds_val, competitor_health_val, image_links,
-        )
-        if _comp_ok:
-            st.caption(f"📧 Alert email sent to {', '.join(COMPETITOR_ALERT_RECIPIENTS)}")
-        else:
-            st.caption(f"⚠️ {_comp_msg}")
-        time.sleep(1)
-        st.rerun()
-
-# =========================================================================
-# STEP 7: RETURN DETAILS — Date + Remark, saved to its own "ReturnDetails"
-# Google Sheet tab. Also farm-level (Customer + Farm), same as Competitor
-# Details above. Submitting fires a separate "Return Available Alert"
-# email.
-# =========================================================================
-st.markdown("---")
-st.markdown("#### 🔁 Return Details")
-
-rd_col1, rd_col2 = st.columns(2)
-with rd_col1:
-    return_date_input = st.date_input(
-        "Date *", value=date.today(), key=f"return_date_{comp_scope}",
-    )
-with rd_col2:
-    st.caption(f"Customer: {customer}  \nFarm: {farm}")
-
-return_remark_input = st.text_area("Remark", key=f"return_remark_{comp_scope}")
-
-if st.button("✅ Submit Return Details", key=f"return_submit_{comp_scope}"):
-    if not customer or not farm or not zone or not area or not technician:
-        st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
-    else:
-        return_record = {
-            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-            "Customer": customer,
-            "Farm Name with Code": farm,
-            "Zone": zone,
-            "Area": area,
-            "Technician": technician,
-            "Date": return_date_input.isoformat(),
-            "Remark": return_remark_input.strip(),
-        }
-        append_return_record(return_record)
-        st.success("✅ Return Details saved!")
-        _ret_ok, _ret_msg = send_return_alert(
-            customer, farm, zone, area, technician,
-            return_date_input.isoformat(), return_remark_input.strip(),
-        )
-        if _ret_ok:
-            st.caption(f"📧 Alert email sent to {', '.join(RETURN_ALERT_RECIPIENTS)}")
-        else:
-            st.caption(f"⚠️ {_ret_msg}")
-        time.sleep(1)
-        st.rerun()
 
 # =========================================================================
 # FARM SUMMARY — every saved record for this Customer + Farm Name with
