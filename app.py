@@ -658,7 +658,7 @@ def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
 # Details record is submitted. Same best-effort pattern as the harvest
 # alert above — never blocks or fails the save itself.
 # =========================================================================
-COMPETITOR_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
+COMPETITOR_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "nmpcfernando@gmail.com"]
 
 def send_competitor_alert(customer, farm, zone, area, technician, comp_date,
                            competitor_feeds, competitor_health, image_links):
@@ -711,7 +711,7 @@ def send_competitor_alert(customer, farm, zone, area, technician, comp_date,
 # Sends a "Return Available Alert" email whenever a Return Details record
 # is submitted. Same best-effort pattern as the other alerts above.
 # =========================================================================
-RETURN_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
+RETURN_ALERT_RECIPIENTS = ["methmaduanjitha1@gmail.com", "nmpcfernando@gmail.com"]
 
 def send_return_alert(customer, farm, zone, area, technician, return_date, remark):
     if not _email_configured():
