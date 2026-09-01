@@ -204,6 +204,7 @@ COLUMN_ORDER = [
     "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
     "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2",
     "Deleted",
+    "Harvest Submitted Date",
 ]
 
 # Columns shown/edited in the pond spreadsheet (the rest — Customer, Farm,
@@ -250,8 +251,8 @@ def get_worksheet():
     # Make sure the header row matches what we expect (self-heals a blank sheet,
     # and adds any new columns — e.g. Harvest Date / Harvest Type / Harvest KG
     # / Harvest ABW / Harvest Date 2 / Harvest Type 2 / Harvest KG 2 /
-    # Harvest ABW 2 / Expect Harvest (KG) / Survival QTY — to a
-    # sheet that was created before they existed).
+    # Harvest ABW 2 / Expect Harvest (KG) / Survival QTY / Harvest Submitted
+    # Date — to a sheet that was created before they existed).
     header = ws.row_values(1)
     if header != COLUMN_ORDER:
         ws.update("A1", [COLUMN_ORDER])
@@ -350,7 +351,13 @@ def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_k
     an empty string just clears that cell. `slot` picks which set of
     Harvest columns to write: 1 -> "Harvest Date/Type/KG/ABW" (the first
     harvest), 2 -> "Harvest Date 2/Type 2/KG 2/ABW 2" (a second harvest for
-    the same pond row, e.g. a partial harvest followed by a later one)."""
+    the same pond row, e.g. a partial harvest followed by a later one).
+
+    Also stamps the single "Harvest Submitted Date" column with today's
+    date every time this is called, regardless of slot — this tracks the
+    date the most recent Harvest Details submission (Partial H or Full H)
+    was actually made, and simply gets overwritten by whichever harvest
+    submission (slot 1 or slot 2) happens most recently."""
     ws = get_worksheet()
     cell = ws.find(str(timestamp), in_column=1)
     if not cell:
@@ -360,10 +367,12 @@ def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_k
     harvest_type_col = COLUMN_ORDER.index(f"Harvest Type{suffix}") + 1
     harvest_kg_col = COLUMN_ORDER.index(f"Harvest KG{suffix}") + 1
     harvest_abw_col = COLUMN_ORDER.index(f"Harvest ABW{suffix}") + 1
+    harvest_submitted_col = COLUMN_ORDER.index("Harvest Submitted Date") + 1
     ws.update_cell(cell.row, harvest_date_col, harvest_date)
     ws.update_cell(cell.row, harvest_type_col, harvest_type)
     ws.update_cell(cell.row, harvest_kg_col, harvest_kg)
     ws.update_cell(cell.row, harvest_abw_col, harvest_abw)
+    ws.update_cell(cell.row, harvest_submitted_col, date.today().isoformat())
     bump_data_version()
     return True
 
@@ -1842,7 +1851,8 @@ if len(df_farm_summary) > 0:
                            "Feed Per Day", "ABW", "Expect Harvest (KG)", "Survival QTY",
                            "Issues", "Water Color", "Grade", "Remark", "Technician",
                            "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
-                           "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2"]
+                           "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2",
+                           "Harvest Submitted Date"]
     _farm_display_cols = [c for c in _farm_display_cols if c in df_farm_summary.columns]
 
     # st.dataframe has no way to color/bold an individual column's text, so
