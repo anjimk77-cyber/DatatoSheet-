@@ -500,7 +500,7 @@ def upload_images(uploaded_files):
 # not configured, this quietly no-ops (the harvest itself still saves
 # fine) instead of blocking the save or crashing the app.
 # =========================================================================
-HARVEST_ALERT_RECIPIENT = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
+HARVEST_ALERT_RECIPIENT = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com","mdeepikasandamalisilva@gmail.com","nmpcfernando@gmail.com","kmnaquaacc@gmail.com"]
 
 def _email_configured():
     return "email" in st.secrets and "sender_email" in st.secrets["email"] and "app_password" in st.secrets["email"]
