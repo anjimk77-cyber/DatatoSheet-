@@ -500,7 +500,7 @@ def upload_images(uploaded_files):
 # not configured, this quietly no-ops (the harvest itself still saves
 # fine) instead of blocking the save or crashing the app.
 # =========================================================================
-HARVEST_ALERT_RECIPIENT = ["methmaduanjitha1@gmail.com", "mdeepikasandamalisilva@gmail.com","nmpcfernando@gmail.com","kmnaquaacc@gmail.com"]
+HARVEST_ALERT_RECIPIENT = ["methmaduanjitha1@gmail.com", "anjimk77@gmail.com"]
 
 def _email_configured():
     return "email" in st.secrets and "sender_email" in st.secrets["email"] and "app_password" in st.secrets["email"]
@@ -590,28 +590,34 @@ def _farm_pond_status_summary(customer, farm):
 
     return still_running, partial_harvest
 
-def send_harvest_alert(customer, farm, pond_number, harvest_type, harvest_date,
-                        harvest_kg="", harvest_abw="", slot=1):
-    """Best-effort email notification, sent only when a new Full H or
-    Partial H harvest record is submitted (see the Harvest Details submit
-    button below — this is the only place this function is called from).
-    Returns (success: bool, message: str) so the caller can show a small
-    status note without ever blocking or failing the harvest save itself."""
+def send_harvest_alert(customer, farm, pond_numbers, harvest_type, harvest_date,
+                        harvest_kg="", harvest_abw=""):
+    """Best-effort email notification, sent once per Harvest Details
+    submission — a single submission can now cover several ponds at once
+    (e.g. "Full H from 3 ponds"), so `pond_numbers` is a list of every pond
+    number included in that submission, and harvest_kg / harvest_abw are
+    the single shared values entered for the whole batch. Returns
+    (success: bool, message: str) so the caller can show a small status
+    note without ever blocking or failing the harvest save itself."""
     if not _email_configured():
         return False, "Email alerts aren't configured yet (missing [email] secrets)."
 
     sender_email = st.secrets["email"]["sender_email"]
     app_password = st.secrets["email"]["app_password"]
 
-    subject = f"New Harvest Record Alert - {harvest_type} - Pond {pond_number}"
+    pond_numbers = list(pond_numbers or [])
+    pond_count = len(pond_numbers)
+    pond_list_str = ", ".join(pond_numbers) if pond_numbers else "(none)"
+
+    subject = f"New Harvest Record Alert - {harvest_type} - {pond_count} Pond(s)"
     lines = [
         "A new harvest record has been submitted.",
         "",
         "Harvest Record Details:",
         f"Customer: {customer}",
         f"Farm: {farm}",
-        f"Pond Number: {pond_number}",
         f"Harvest Type: {harvest_type}",
+        f"{harvest_type} from {pond_count} pond(s): {pond_list_str}",
         f"Harvest Date: {harvest_date}",
     ]
     if str(harvest_kg).strip():
@@ -1547,122 +1553,154 @@ if pond_number:
     _pond_editor_fragment()
 
 # =========================================================================
-# STEP 5: HARVEST DETAILS — Date + Harvest Type (required), plus optional
-# Harvest KG and Harvest ABW. This pond's row supports up to TWO harvest
-# records: "Harvest Date/Type/KG/ABW" (the first harvest) and
-# "Harvest Date 2/Type 2/KG 2/ABW 2" (a second harvest, e.g. a later
-# partial/full harvest for the same pond). Whichever slot is still empty is
-# the one this form saves into next — no date-matching, and no
-# overwrite-warning caption; the app just quietly fills the next open slot,
-# or edits the last slot again if both are already filled.
+# STEP 5: HARVEST DETAILS — a single Harvest Date / Harvest Type /
+# Harvest KG / Harvest ABW submission can cover MULTIPLE ponds at once
+# (e.g. "Full H from 3 ponds, 3000 KG total"), so ponds are picked here via
+# a multiselect from every pond on record for this farm — independent of
+# whichever single pond is selected up in Pond Details above.
+#
+# For every pond chosen, the submission is written onto that pond's own
+# latest saved Pond Details row: Harvest Date/Type are the same for every
+# selected pond, and Harvest KG / Harvest ABW are also the same shared
+# values for every selected pond (Harvest KG additionally gets the pond
+# COUNT for this batch appended in brackets, e.g. "3000 (3)", so it's
+# clear at a glance how many ponds that KG figure was split across).
+# Each pond still independently picks slot 1 ("Harvest Date/Type/KG/ABW")
+# or slot 2 ("... 2") depending on whether it already has a first harvest
+# recorded, exactly as before.
 # =========================================================================
 st.markdown("---")
 st.markdown("#### 🌾 Harvest Details")
 
-if not pond_number:
-    st.info("Select a pond above to record harvest details.")
-elif len(df_pond_hist_full) == 0:
-    st.info(f"No saved Pond Details records yet for Pond {pond_number}. Add one above first, "
-            "then come back here to record its harvest.")
+if not existing_ponds:
+    st.info("No saved Pond Details records yet for this farm. Add pond records above first, "
+            "then come back here to record a harvest.")
 else:
-    # df_pond_hist_full is already scoped to this Customer + Farm + Pond,
-    # and already sorted ascending by date — so the last row is this
-    # pond's row to save harvest info onto.
-    pond_row = df_pond_hist_full.iloc[-1]
-    harvest_row_timestamp = str(pond_row.get("Timestamp") or "").strip()
-
-    existing_harvest_date = str(pond_row.get("Harvest Date") or "").strip()
-    existing_harvest_type = str(pond_row.get("Harvest Type") or "").strip()
-    existing_harvest_kg = str(pond_row.get("Harvest KG") or "").strip()
-    existing_harvest_abw = str(pond_row.get("Harvest ABW") or "").strip()
-
-    existing_harvest_date2 = str(pond_row.get("Harvest Date 2") or "").strip()
-    existing_harvest_type2 = str(pond_row.get("Harvest Type 2") or "").strip()
-    existing_harvest_kg2 = str(pond_row.get("Harvest KG 2") or "").strip()
-    existing_harvest_abw2 = str(pond_row.get("Harvest ABW 2") or "").strip()
-
-    slot1_filled = bool(existing_harvest_date or existing_harvest_type)
-    slot2_filled = bool(existing_harvest_date2 or existing_harvest_type2)
-
-    if not slot1_filled:
-        target_slot = 1
-        prefill_date, prefill_type = existing_harvest_date, existing_harvest_type
-        prefill_kg, prefill_abw = existing_harvest_kg, existing_harvest_abw
-    elif not slot2_filled:
-        # First harvest already saved — this submission records the
-        # SECOND harvest, so start from a blank form.
-        target_slot = 2
-        prefill_date, prefill_type, prefill_kg, prefill_abw = "", "", "", ""
+    df_harvest_farm = load_data()
+    _harvest_required = {"Customer", "Farm Name with Code", "Pond Number"}
+    if len(df_harvest_farm) > 0 and _harvest_required.issubset(df_harvest_farm.columns):
+        df_harvest_farm = df_harvest_farm[
+            (df_harvest_farm["Customer"] == customer) & (df_harvest_farm["Farm Name with Code"] == farm)
+        ].copy()
     else:
-        # Both slots already used — keep editing the second one.
-        target_slot = 2
-        prefill_date, prefill_type = existing_harvest_date2, existing_harvest_type2
-        prefill_kg, prefill_abw = existing_harvest_kg2, existing_harvest_abw2
+        df_harvest_farm = pd.DataFrame(columns=COLUMN_ORDER)
 
-    def _parse_existing_harvest_date(val):
-        parsed = pd.to_datetime(val, errors="coerce")
-        return parsed.date() if pd.notna(parsed) else date.today()
+    def _latest_saved_row_for_pond(df_farm_scope, pond):
+        """Returns this pond's most recently dated saved row (as a Series),
+        or None if it has none. Mirrors the same "sort by parsed Date, take
+        the last one" logic used for the single-pond history above."""
+        sub = df_farm_scope[df_farm_scope["Pond Number"] == pond].copy()
+        if len(sub) == 0:
+            return None
+        sub["_ParsedDate"] = pd.to_datetime(sub["Date"], errors="coerce")
+        sub = sub.sort_values(by="_ParsedDate")
+        return sub.iloc[-1]
 
-    st.caption(f"📌 This will be saved as Harvest {target_slot} for Pond {pond_number}.")
+    harvest_scope = f"{customer}_{farm}"
+
+    selected_harvest_ponds = st.multiselect(
+        "Select Pond(s) *", existing_ponds, key=f"harvest_ponds_{harvest_scope}",
+        help="Pick every pond included in this harvest submission — e.g. pick 3 ponds for a "
+             "3000 KG Full Harvest spread across those 3 ponds.",
+    )
 
     hv_col1, hv_col2 = st.columns(2)
     with hv_col1:
         harvest_date_input = st.date_input(
-            "Harvest Date *",
-            value=_parse_existing_harvest_date(prefill_date) if prefill_date else date.today(),
-            key=f"harvest_date_{widget_scope}_{target_slot}",
+            "Harvest Date *", value=date.today(), key=f"harvest_date_{harvest_scope}",
         )
     with hv_col2:
-        default_harvest_index = (
-            HARVEST_TYPE_OPTIONS.index(prefill_type)
-            if prefill_type in HARVEST_TYPE_OPTIONS else 0
-        )
         harvest_type = st.selectbox(
-            "Harvest Type *", HARVEST_TYPE_OPTIONS, index=default_harvest_index,
-            key=f"harvest_type_{widget_scope}_{target_slot}",
+            "Harvest Type *", HARVEST_TYPE_OPTIONS, key=f"harvest_type_{harvest_scope}",
         )
 
-    # Harvest KG and Harvest ABW are optional (not required) — plain text
-    # inputs, blank by default unless something was already saved.
+    # Harvest KG and Harvest ABW are optional (not required) — one shared
+    # value entered once and written to every selected pond's record.
     hv_col3, hv_col4 = st.columns(2)
     with hv_col3:
         harvest_kg_input = st.text_input(
-            "Harvest KG", value=prefill_kg, key=f"harvest_kg_{widget_scope}_{target_slot}",
+            "Harvest KG (total across selected ponds)", key=f"harvest_kg_{harvest_scope}",
         )
     with hv_col4:
         harvest_abw_input = st.text_input(
-            "Harvest ABW", value=prefill_abw, key=f"harvest_abw_{widget_scope}_{target_slot}",
+            "Harvest ABW", key=f"harvest_abw_{harvest_scope}",
         )
 
-    if st.button("✅ Submit Harvest", key=f"harvest_submit_{widget_scope}"):
-        if not harvest_row_timestamp:
-            st.error("❌ Could not find that record's timestamp — please refresh and try again.")
-        elif update_harvest_by_timestamp(
-            harvest_row_timestamp, harvest_date_input.isoformat(), harvest_type,
-            harvest_kg_input.strip(), harvest_abw_input.strip(), slot=target_slot,
-        ):
-            st.success(
-                f"✅ Harvest {target_slot} info saved for Pond {pond_number} — "
-                f"{harvest_date_input.isoformat()} ({harvest_type})."
-            )
-            # Fire off the "New Harvest Record Alert" email. This never
-            # blocks or fails the harvest save above — if it's not
-            # configured yet, or the send fails, we just show a small
-            # note and move on.
-            _email_ok, _email_msg = send_harvest_alert(
-                customer, farm, pond_number, harvest_type,
-                harvest_date_input.isoformat(),
-                harvest_kg_input.strip(), harvest_abw_input.strip(),
-                slot=target_slot,
-            )
-            if _email_ok:
-                st.caption(f"📧 Alert email sent to {', '.join(HARVEST_ALERT_RECIPIENT)}")
-            else:
-                st.caption(f"⚠️ {_email_msg}")
-            time.sleep(1)
-            st.rerun()
+    if selected_harvest_ponds:
+        st.caption(
+            f"📌 This will be saved as **{harvest_type}** for **{len(selected_harvest_ponds)} pond(s)**: "
+            + ", ".join(selected_harvest_ponds)
+        )
+
+    if st.button("✅ Submit Harvest", key=f"harvest_submit_{harvest_scope}"):
+        if not selected_harvest_ponds:
+            st.error("❌ Please select at least one pond.")
         else:
-            st.error("❌ Could not find that record in the Google Sheet.")
+            pond_count = len(selected_harvest_ponds)
+            harvest_kg_clean = harvest_kg_input.strip()
+            # Harvest KG carries the pond count for this batch in brackets,
+            # e.g. "3000 (3)" for a 3000 KG harvest spread across 3 ponds —
+            # this is written identically onto every selected pond's row.
+            harvest_kg_final = f"{harvest_kg_clean} ({pond_count})" if harvest_kg_clean else ""
+            harvest_abw_clean = harvest_abw_input.strip()
+
+            saved_ponds, failed_ponds = [], []
+            for p in selected_harvest_ponds:
+                latest_row = _latest_saved_row_for_pond(df_harvest_farm, p)
+                if latest_row is None:
+                    failed_ponds.append(p)
+                    continue
+                ts = str(latest_row.get("Timestamp") or "").strip()
+                if not ts:
+                    failed_ponds.append(p)
+                    continue
+
+                slot1_filled = bool(
+                    str(latest_row.get("Harvest Date") or "").strip()
+                    or str(latest_row.get("Harvest Type") or "").strip()
+                )
+                slot2_filled = bool(
+                    str(latest_row.get("Harvest Date 2") or "").strip()
+                    or str(latest_row.get("Harvest Type 2") or "").strip()
+                )
+                # Same per-pond slot logic as before: fill slot 1 if it's
+                # still empty, otherwise slot 2 (re-editing slot 2 again if
+                # both are already used).
+                target_slot = 1 if not slot1_filled else 2
+
+                ok = update_harvest_by_timestamp(
+                    ts, harvest_date_input.isoformat(), harvest_type,
+                    harvest_kg_final, harvest_abw_clean, slot=target_slot,
+                )
+                if ok:
+                    saved_ponds.append(p)
+                else:
+                    failed_ponds.append(p)
+
+            if saved_ponds:
+                st.success(
+                    f"✅ {harvest_type} saved for {len(saved_ponds)} pond(s) — "
+                    f"{harvest_date_input.isoformat()}: {', '.join(saved_ponds)}."
+                )
+                # Fire off ONE "New Harvest Record Alert" email covering the
+                # whole batch (e.g. "Full H from 3 ponds"), plus the farm's
+                # still-running / partially-harvested summary with today's
+                # DOCs. This never blocks or fails the harvest save above —
+                # if it's not configured yet, or the send fails, we just
+                # show a small note and move on.
+                _email_ok, _email_msg = send_harvest_alert(
+                    customer, farm, saved_ponds, harvest_type,
+                    harvest_date_input.isoformat(), harvest_kg_final, harvest_abw_clean,
+                )
+                if _email_ok:
+                    st.caption(f"📧 Alert email sent to {', '.join(HARVEST_ALERT_RECIPIENT)}")
+                else:
+                    st.caption(f"⚠️ {_email_msg}")
+            if failed_ponds:
+                st.error(f"❌ Could not save harvest for: {', '.join(failed_ponds)} (record not found).")
+            if saved_ponds:
+                time.sleep(1)
+                st.rerun()
 
 # =========================================================================
 # STEP 6: COMPETITOR DETAILS — Date, a Yes/No toggle each for Competitor
