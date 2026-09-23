@@ -195,11 +195,29 @@ def calc_expected_harvest_and_survival(abw, feed_per_day, species):
     expected_harvest_kg = survival_qty * abw_val / 1000
     return round(expected_harvest_kg, 2), round(survival_qty, 0)
 
+def calc_survival_rate(survival_qty, density):
+    """Returns Survival Rate = (Survival QTY / Density) * 100, rounded to a
+    whole percent — or None if Density isn't a usable positive number
+    (e.g. the user hasn't entered a Density yet) or Survival QTY isn't
+    available. None means the "Survival Rate" cell is left blank rather
+    than showing 0% or an error."""
+    try:
+        density_val = float(density)
+    except (TypeError, ValueError):
+        return None
+    if density_val <= 0:
+        return None
+    try:
+        survival_val = float(survival_qty)
+    except (TypeError, ValueError):
+        return None
+    return round(survival_val / density_val * 100, 0)
+
 COLUMN_ORDER = [
     "Timestamp", "Customer", "Farm Name with Code", "Zone", "Area",
     "Pond Number", "Date", "Species Culture", "Cycle Type",
     "DOC", "Density", "Feed Per Day", "ABW",
-    "Expect Harvest (KG)", "Survival QTY",
+    "Expect Harvest (KG)", "Survival QTY", "Survival Rate",
     "Issues", "Water Color", "Grade", "Remark", "Technician",
     "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
     "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2",
@@ -211,7 +229,7 @@ COLUMN_ORDER = [
 # Zone, Area, Pond, Technician, Timestamp — come from the selectors above
 # the table and are attached automatically when a row is saved).
 POND_COLS = ["Date", "DOC", "Species Culture", "Density", "Feed Per Day", "ABW",
-             "Expect Harvest (KG)", "Survival QTY",
+             "Expect Harvest (KG)", "Survival QTY", "Survival Rate",
              "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
 
 # =========================================================================
@@ -251,8 +269,8 @@ def get_worksheet():
     # Make sure the header row matches what we expect (self-heals a blank sheet,
     # and adds any new columns — e.g. Harvest Date / Harvest Type / Harvest KG
     # / Harvest ABW / Harvest Date 2 / Harvest Type 2 / Harvest KG 2 /
-    # Harvest ABW 2 / Expect Harvest (KG) / Survival QTY / Harvest Submitted
-    # Date — to a sheet that was created before they existed).
+    # Harvest ABW 2 / Expect Harvest (KG) / Survival QTY / Survival Rate /
+    # Harvest Submitted Date — to a sheet that was created before they existed).
     header = ws.row_values(1)
     if header != COLUMN_ORDER:
         ws.update("A1", [COLUMN_ORDER])
@@ -979,7 +997,7 @@ def _pond_editor_fragment():
     # single Multiselect column — so here the saved "Issues" string is
     # split back out into a Python list for display/editing.
     EDITOR_POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW",
-                         "Expect Harvest (KG)", "Survival QTY", "Species Culture",
+                         "Expect Harvest (KG)", "Survival QTY", "Survival Rate", "Species Culture",
                          "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
     display_cols = ["Timestamp"] + EDITOR_POND_COLS
     if len(df_pond_hist_full) > 0:
@@ -1001,7 +1019,7 @@ def _pond_editor_fragment():
 
     _TEXT_COLS = ["Timestamp", "ABW", "Species Culture", "Cycle Type",
                   "Water Color", "Grade", "Remark"]
-    _NUM_COLS = ["DOC", "Density", "Feed Per Day", "Expect Harvest (KG)", "Survival QTY"]
+    _NUM_COLS = ["DOC", "Density", "Feed Per Day", "Expect Harvest (KG)", "Survival QTY", "Survival Rate"]
 
     def _normalize_issues_cell(v):
         if isinstance(v, list):
@@ -1036,7 +1054,7 @@ def _pond_editor_fragment():
             "Timestamp": "object", "Date": "object",
             "DOC": "float64", "Density": "float64", "Feed Per Day": "float64",
             "ABW": "object",
-            "Expect Harvest (KG)": "float64", "Survival QTY": "float64",
+            "Expect Harvest (KG)": "float64", "Survival QTY": "float64", "Survival Rate": "float64",
             "Species Culture": "object", "Cycle Type": "object",
             "Issues": "object",
             "Water Color": "object", "Grade": "object",
@@ -1067,6 +1085,9 @@ def _pond_editor_fragment():
         "Survival QTY": st.column_config.NumberColumn(
             "Survival QTY (auto)", format="%.0f",
             help="Auto-calculated from ABW, Feed/Day & Species Culture (FCR.xlsx reference) — edit to override"),
+        "Survival Rate": st.column_config.NumberColumn(
+            "Survival Rate (auto)", format="%.0f%%",
+            help="Auto-calculated as (Survival QTY / Density) * 100 — left blank until a Density is entered; edit to override"),
         "Species Culture": st.column_config.SelectboxColumn("Species Culture *", options=SPECIES_CULTURE,
                                                               required=True, default=default_species),
         "Cycle Type": st.column_config.SelectboxColumn("Cycle Type *", options=CYCLE_TYPE,
@@ -1085,7 +1106,7 @@ def _pond_editor_fragment():
     # order and of the Google Sheet's COLUMN_ORDER (data storage is
     # unaffected). Species Culture is placed 3rd, right after Date/DOC.
     column_order = ["Date", "DOC", "Species Culture", "Density", "Feed Per Day",
-                     "ABW", "Expect Harvest (KG)", "Survival QTY",
+                     "ABW", "Expect Harvest (KG)", "Survival QTY", "Survival Rate",
                      "Cycle Type", "Issues", "Water Color", "Grade", "Remark", "Status"]
 
     editor_key = f"editor_{widget_scope}"
@@ -1180,22 +1201,28 @@ def _pond_editor_fragment():
         return df
 
     def _recompute_harvest_survival_row(df, i):
-        """Fill Expect Harvest (KG) / Survival QTY for row i, in place, if
-        either is still blank — using that same row's ABW, Feed Per Day and
-        Species Culture (see calc_expected_harvest_and_survival, based on
-        the FCR.xlsx reference sheet). Never overwrites a value the user
-        already typed/edited."""
+        """Fill Expect Harvest (KG) / Survival QTY / Survival Rate for row i,
+        in place, if still blank — using that same row's ABW, Feed Per Day,
+        Species Culture and Density (see calc_expected_harvest_and_survival
+        and calc_survival_rate, based on the FCR.xlsx reference sheet).
+        Never overwrites a value the user already typed/edited. Survival
+        Rate stays blank whenever Density hasn't been entered."""
         harvest_blank = _doc_is_blank(df.at[i, "Expect Harvest (KG)"])
         survival_blank = _doc_is_blank(df.at[i, "Survival QTY"])
-        if not harvest_blank and not survival_blank:
-            return
-        hv, surv = calc_expected_harvest_and_survival(
-            df.at[i, "ABW"], df.at[i, "Feed Per Day"], df.at[i, "Species Culture"]
-        )
-        if harvest_blank and hv is not None:
-            df.at[i, "Expect Harvest (KG)"] = hv
-        if survival_blank and surv is not None:
-            df.at[i, "Survival QTY"] = surv
+        if harvest_blank or survival_blank:
+            hv, surv = calc_expected_harvest_and_survival(
+                df.at[i, "ABW"], df.at[i, "Feed Per Day"], df.at[i, "Species Culture"]
+            )
+            if harvest_blank and hv is not None:
+                df.at[i, "Expect Harvest (KG)"] = hv
+            if survival_blank and surv is not None:
+                df.at[i, "Survival QTY"] = surv
+
+        if "Survival Rate" in df.columns and _doc_is_blank(df.at[i, "Survival Rate"]):
+            density_val = df.at[i, "Density"] if "Density" in df.columns else None
+            rate = calc_survival_rate(df.at[i, "Survival QTY"], density_val)
+            if rate is not None:
+                df.at[i, "Survival Rate"] = rate
 
     def _recompute_harvest_survival(df):
         df = df.reset_index(drop=True).copy()
@@ -1253,15 +1280,15 @@ def _pond_editor_fragment():
 
         DOC auto-calc and the Status column only ever depend on the Date/DOC
         chain and on rows being added/removed; Expect Harvest (KG) / Survival
-        QTY only depend on that same row's ABW / Feed Per Day / Species
-        Culture. So we only run the full rebuild (_normalize_pond_dtypes /
-        _recompute_docs / _recompute_harvest_survival / _recompute_status)
-        when one of those actually happened. A plain edit to any other column
-        (Density, Cycle, Water Color, Grade, Remark, Issues) just patches
-        that one cell in place on the SAME dataframe object instead of
-        rebuilding a fresh one — passing a materially-identical dataframe
-        back into the grid on every keystroke was what made it reset its
-        scroll position back to the first columns each time."""
+        QTY / Survival Rate only depend on that same row's ABW / Feed Per Day
+        / Species Culture / Density. So we only run the full rebuild
+        (_normalize_pond_dtypes / _recompute_docs / _recompute_harvest_survival
+        / _recompute_status) when one of those actually happened. A plain
+        edit to any other column (Cycle, Water Color, Grade, Remark, Issues)
+        just patches that one cell in place on the SAME dataframe object
+        instead of rebuilding a fresh one — passing a materially-identical
+        dataframe back into the grid on every keystroke was what made it
+        reset its scroll position back to the first columns each time."""
         state = st.session_state.get(editor_key)
         if not state:
             return
@@ -1270,7 +1297,7 @@ def _pond_editor_fragment():
         added_rows = state.get("added_rows", [])
         deleted_rows = state.get("deleted_rows", [])
 
-        RECOMPUTE_TRIGGER_COLS = ("Date", "DOC", "ABW", "Feed Per Day", "Species Culture", "Cycle Type")
+        RECOMPUTE_TRIGGER_COLS = ("Date", "DOC", "ABW", "Feed Per Day", "Species Culture", "Cycle Type", "Density")
         needs_recompute = bool(added_rows) or bool(deleted_rows) or any(
             any(col in changes for col in RECOMPUTE_TRIGGER_COLS) for changes in edited_rows.values()
         )
@@ -1489,6 +1516,13 @@ def _pond_editor_fragment():
             expect_harvest_final = "" if _doc_is_blank(expect_harvest_val) else expect_harvest_val
             survival_qty_final = "" if _doc_is_blank(survival_qty_val) else survival_qty_val
 
+            # --- Survival Rate (auto-calculate if blank, from Survival QTY
+            # + Density — stays blank whenever Density hasn't been entered) ---
+            survival_rate_val = row.get("Survival Rate")
+            if _doc_is_blank(survival_rate_val):
+                survival_rate_val = calc_survival_rate(survival_qty_val, row.get("Density"))
+            survival_rate_final = "" if _doc_is_blank(survival_rate_val) else survival_rate_val
+
             # --- Combine the selected Issues (multiselect) into one string ---
             issues_val = row.get("Issues")
             if isinstance(issues_val, list):
@@ -1513,6 +1547,7 @@ def _pond_editor_fragment():
                 "ABW": str(row.get("ABW") or "").strip(),
                 "Expect Harvest (KG)": expect_harvest_final,
                 "Survival QTY": survival_qty_final,
+                "Survival Rate": survival_rate_final,
                 "Species Culture": species_val_row,
                 "Cycle Type": cycle_val_row,
                 "Issues": issues_final,
@@ -1886,7 +1921,7 @@ if len(df_farm_summary) > 0:
     df_farm_summary["DOC Today"] = df_farm_summary.apply(_compute_doc_today, axis=1)
 
     _farm_display_cols = ["Pond Number", "Date", "Species Culture", "Cycle Type", "DOC", "DOC Today", "Density",
-                           "Feed Per Day", "ABW", "Expect Harvest (KG)", "Survival QTY",
+                           "Feed Per Day", "ABW", "Expect Harvest (KG)", "Survival QTY", "Survival Rate",
                            "Issues", "Water Color", "Grade", "Remark", "Technician",
                            "Harvest Date", "Harvest Type", "Harvest KG", "Harvest ABW",
                            "Harvest Date 2", "Harvest Type 2", "Harvest KG 2", "Harvest ABW 2",
