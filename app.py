@@ -1359,25 +1359,12 @@ def _pond_editor_fragment():
 
         st.session_state[working_key] = df
         # Clear only the widget's own edit-tracking (not the whole widget
-        # state) so the grid doesn't get fully remounted on every keystroke.
-        # Cleared IN PLACE (no item assignment) because the widget state can
-        # be a read-only wrapper, which raised a TypeError when many rows
-        # were entered quickly. If even that isn't allowed, fall back to
-        # dropping the widget state so it re-initialises from working_key
-        # (which already contains every edit).
-        try:
-            for _k in ("edited_rows", "added_rows", "deleted_rows"):
-                _v = state[_k]
-                if hasattr(_v, "clear"):
-                    _v.clear()
-                else:
-                    raise TypeError("cannot clear widget state in place")
-        except Exception:
-            st.session_state[added_count_key] = 0
-            try:
-                del st.session_state[editor_key]
-            except Exception:
-                pass
+        # state) so the grid doesn't get fully remounted on every keystroke
+        # — that remount was what reset the scroll position/focus after
+        # each cell edit.
+        state["edited_rows"] = {}
+        state["added_rows"] = []
+        state["deleted_rows"] = []
 
     edited_df = st.data_editor(
         st.session_state[working_key],
