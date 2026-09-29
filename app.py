@@ -318,12 +318,14 @@ def get_return_worksheet():
         ws.update("A1", [RETURN_COLUMN_ORDER])
     return ws
 
+@st.cache_data(ttl=30, show_spinner=False)
 def _load_data_cached(data_version, sheet_id):
-    # Always read fresh from the Google Sheet — no caching. This is what
-    # makes edits made directly in the Google Sheet (e.g. correcting a
-    # Density value, or editing any other saved cell) show up back in the
-    # app's pond history the next time the page loads/reruns, instead of
-    # being stuck showing the first value that was ever saved.
+    # Cached for 30 seconds so the page doesn't re-read the whole Google
+    # Sheet several times on every widget interaction (that was what kept
+    # the "Running" indicator on, especially on mobile connections).
+    # Saves / deletes / harvest updates call bump_data_version(), which
+    # changes data_version and forces a fresh read right away. Edits made
+    # directly in the Google Sheet show up within the TTL (30 seconds).
     ws = get_worksheet()
     records = ws.get_all_records()
     df = pd.DataFrame(records)
@@ -336,7 +338,9 @@ def _load_data_cached(data_version, sheet_id):
     return df
 
 def bump_data_version():
-    st.session_state["_data_version"] = st.session_state.get("_data_version", 0) + 1
+    # A unique value (not +1) so the cache key is never shared with another
+    # user's session, which could otherwise return their older cached copy.
+    st.session_state["_data_version"] = uuid.uuid4().hex
 
 def load_data():
     """Returns the sheet's data with any soft-deleted rows filtered out. The
@@ -386,11 +390,22 @@ def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_k
     harvest_kg_col = COLUMN_ORDER.index(f"Harvest KG{suffix}") + 1
     harvest_abw_col = COLUMN_ORDER.index(f"Harvest ABW{suffix}") + 1
     harvest_submitted_col = COLUMN_ORDER.index("Harvest Submitted Date") + 1
-    ws.update_cell(cell.row, harvest_date_col, harvest_date)
-    ws.update_cell(cell.row, harvest_type_col, harvest_type)
-    ws.update_cell(cell.row, harvest_kg_col, harvest_kg)
-    ws.update_cell(cell.row, harvest_abw_col, harvest_abw)
-    ws.update_cell(cell.row, harvest_submitted_col, date.today().isoformat())
+    # One batched request instead of 5 separate update_cell calls (much
+    # faster on slow mobile connections). Harvest Date/Type/KG/ABW are
+    # adjacent columns, so they go in a single range.
+    ws.batch_update(
+        [
+            {
+                "range": f"{rowcol_to_a1(cell.row, harvest_date_col)}:{rowcol_to_a1(cell.row, harvest_abw_col)}",
+                "values": [[harvest_date, harvest_type, harvest_kg, harvest_abw]],
+            },
+            {
+                "range": rowcol_to_a1(cell.row, harvest_submitted_col),
+                "values": [[date.today().isoformat()]],
+            },
+        ],
+        value_input_option="USER_ENTERED",
+    )
     bump_data_version()
     return True
 
@@ -1581,7 +1596,7 @@ def _pond_editor_fragment():
             if editor_key in st.session_state:
                 del st.session_state[editor_key]
             st.session_state[saving_flag_key] = False
-            time.sleep(1)
+            time.sleep(0.3)
             st.rerun()
 
 if pond_number:
@@ -1607,135 +1622,139 @@ if pond_number:
 st.markdown("---")
 st.markdown("#### 🌾 Harvest Details")
 
-if not existing_ponds:
-    st.info("No saved Pond Details records yet for this farm. Add pond records above first, "
-            "then come back here to record a harvest.")
-else:
-    df_harvest_farm = load_data()
-    _harvest_required = {"Customer", "Farm Name with Code", "Pond Number"}
-    if len(df_harvest_farm) > 0 and _harvest_required.issubset(df_harvest_farm.columns):
-        df_harvest_farm = df_harvest_farm[
-            (df_harvest_farm["Customer"] == customer) & (df_harvest_farm["Farm Name with Code"] == farm)
-        ].copy()
+@st.fragment
+def _harvest_fragment():
+    if not existing_ponds:
+        st.info("No saved Pond Details records yet for this farm. Add pond records above first, "
+                "then come back here to record a harvest.")
     else:
-        df_harvest_farm = pd.DataFrame(columns=COLUMN_ORDER)
-
-    def _latest_saved_row_for_pond(df_farm_scope, pond):
-        """Returns this pond's most recently dated saved row (as a Series),
-        or None if it has none. Mirrors the same "sort by parsed Date, take
-        the last one" logic used for the single-pond history above."""
-        sub = df_farm_scope[df_farm_scope["Pond Number"] == pond].copy()
-        if len(sub) == 0:
-            return None
-        sub["_ParsedDate"] = pd.to_datetime(sub["Date"], errors="coerce")
-        sub = sub.sort_values(by="_ParsedDate")
-        return sub.iloc[-1]
-
-    harvest_scope = f"{customer}_{farm}"
-
-    selected_harvest_ponds = st.multiselect(
-        "Select Pond(s) *", existing_ponds, key=f"harvest_ponds_{harvest_scope}",
-        help="Pick every pond included in this harvest submission — e.g. pick 3 ponds for a "
-             "3000 KG Full Harvest spread across those 3 ponds.",
-    )
-
-    hv_col1, hv_col2 = st.columns(2)
-    with hv_col1:
-        harvest_date_input = st.date_input(
-            "Harvest Date *", value=date.today(), key=f"harvest_date_{harvest_scope}",
-        )
-    with hv_col2:
-        harvest_type = st.selectbox(
-            "Harvest Type *", HARVEST_TYPE_OPTIONS, key=f"harvest_type_{harvest_scope}",
-        )
-
-    # Harvest KG and Harvest ABW are optional (not required) — one shared
-    # value entered once and written to every selected pond's record.
-    hv_col3, hv_col4 = st.columns(2)
-    with hv_col3:
-        harvest_kg_input = st.text_input(
-            "Harvest KG (total across selected ponds)", key=f"harvest_kg_{harvest_scope}",
-        )
-    with hv_col4:
-        harvest_abw_input = st.text_input(
-            "Harvest ABW", key=f"harvest_abw_{harvest_scope}",
-        )
-
-    if selected_harvest_ponds:
-        st.caption(
-            f"📌 This will be saved as **{harvest_type}** for **{len(selected_harvest_ponds)} pond(s)**: "
-            + ", ".join(selected_harvest_ponds)
-        )
-
-    if st.button("✅ Submit Harvest", key=f"harvest_submit_{harvest_scope}"):
-        if not selected_harvest_ponds:
-            st.error("❌ Please select at least one pond.")
+        df_harvest_farm = load_data()
+        _harvest_required = {"Customer", "Farm Name with Code", "Pond Number"}
+        if len(df_harvest_farm) > 0 and _harvest_required.issubset(df_harvest_farm.columns):
+            df_harvest_farm = df_harvest_farm[
+                (df_harvest_farm["Customer"] == customer) & (df_harvest_farm["Farm Name with Code"] == farm)
+            ].copy()
         else:
-            pond_count = len(selected_harvest_ponds)
-            harvest_kg_clean = harvest_kg_input.strip()
-            # Harvest KG carries the pond count for this batch in brackets,
-            # e.g. "3000 (3)" for a 3000 KG harvest spread across 3 ponds —
-            # this is written identically onto every selected pond's row.
-            harvest_kg_final = f"{harvest_kg_clean} ({pond_count})" if harvest_kg_clean else ""
-            harvest_abw_clean = harvest_abw_input.strip()
+            df_harvest_farm = pd.DataFrame(columns=COLUMN_ORDER)
 
-            saved_ponds, failed_ponds = [], []
-            for p in selected_harvest_ponds:
-                latest_row = _latest_saved_row_for_pond(df_harvest_farm, p)
-                if latest_row is None:
-                    failed_ponds.append(p)
-                    continue
-                ts = str(latest_row.get("Timestamp") or "").strip()
-                if not ts:
-                    failed_ponds.append(p)
-                    continue
+        def _latest_saved_row_for_pond(df_farm_scope, pond):
+            """Returns this pond's most recently dated saved row (as a Series),
+            or None if it has none. Mirrors the same "sort by parsed Date, take
+            the last one" logic used for the single-pond history above."""
+            sub = df_farm_scope[df_farm_scope["Pond Number"] == pond].copy()
+            if len(sub) == 0:
+                return None
+            sub["_ParsedDate"] = pd.to_datetime(sub["Date"], errors="coerce")
+            sub = sub.sort_values(by="_ParsedDate")
+            return sub.iloc[-1]
 
-                slot1_filled = bool(
-                    str(latest_row.get("Harvest Date") or "").strip()
-                    or str(latest_row.get("Harvest Type") or "").strip()
-                )
-                slot2_filled = bool(
-                    str(latest_row.get("Harvest Date 2") or "").strip()
-                    or str(latest_row.get("Harvest Type 2") or "").strip()
-                )
-                # Same per-pond slot logic as before: fill slot 1 if it's
-                # still empty, otherwise slot 2 (re-editing slot 2 again if
-                # both are already used).
-                target_slot = 1 if not slot1_filled else 2
+        harvest_scope = f"{customer}_{farm}"
 
-                ok = update_harvest_by_timestamp(
-                    ts, harvest_date_input.isoformat(), harvest_type,
-                    harvest_kg_final, harvest_abw_clean, slot=target_slot,
-                )
-                if ok:
-                    saved_ponds.append(p)
-                else:
-                    failed_ponds.append(p)
+        selected_harvest_ponds = st.multiselect(
+            "Select Pond(s) *", existing_ponds, key=f"harvest_ponds_{harvest_scope}",
+            help="Pick every pond included in this harvest submission — e.g. pick 3 ponds for a "
+                 "3000 KG Full Harvest spread across those 3 ponds.",
+        )
 
-            if saved_ponds:
-                st.success(
-                    f"✅ {harvest_type} saved for {len(saved_ponds)} pond(s) — "
-                    f"{harvest_date_input.isoformat()}: {', '.join(saved_ponds)}."
-                )
-                # Fire off ONE "New Harvest Record Alert" email covering the
-                # whole batch (e.g. "Full H from 3 ponds"), plus the farm's
-                # still-running / partially-harvested summary with today's
-                # DOCs. This never blocks or fails the harvest save above —
-                # if it's not configured yet, or the send fails, we just
-                # show a small note and move on.
-                _email_ok, _email_msg = send_harvest_alert(
-                    customer, farm, saved_ponds, harvest_type,
-                    harvest_date_input.isoformat(), harvest_kg_final, harvest_abw_clean,
-                )
-                if _email_ok:
-                    st.caption(f"📧 Alert email sent to {', '.join(HARVEST_ALERT_RECIPIENT)}")
-                else:
-                    st.caption(f"⚠️ {_email_msg}")
-            if failed_ponds:
-                st.error(f"❌ Could not save harvest for: {', '.join(failed_ponds)} (record not found).")
-            if saved_ponds:
-                time.sleep(1)
-                st.rerun()
+        hv_col1, hv_col2 = st.columns(2)
+        with hv_col1:
+            harvest_date_input = st.date_input(
+                "Harvest Date *", value=date.today(), key=f"harvest_date_{harvest_scope}",
+            )
+        with hv_col2:
+            harvest_type = st.selectbox(
+                "Harvest Type *", HARVEST_TYPE_OPTIONS, key=f"harvest_type_{harvest_scope}",
+            )
+
+        # Harvest KG and Harvest ABW are optional (not required) — one shared
+        # value entered once and written to every selected pond's record.
+        hv_col3, hv_col4 = st.columns(2)
+        with hv_col3:
+            harvest_kg_input = st.text_input(
+                "Harvest KG (total across selected ponds)", key=f"harvest_kg_{harvest_scope}",
+            )
+        with hv_col4:
+            harvest_abw_input = st.text_input(
+                "Harvest ABW", key=f"harvest_abw_{harvest_scope}",
+            )
+
+        if selected_harvest_ponds:
+            st.caption(
+                f"📌 This will be saved as **{harvest_type}** for **{len(selected_harvest_ponds)} pond(s)**: "
+                + ", ".join(selected_harvest_ponds)
+            )
+
+        if st.button("✅ Submit Harvest", key=f"harvest_submit_{harvest_scope}"):
+            if not selected_harvest_ponds:
+                st.error("❌ Please select at least one pond.")
+            else:
+                pond_count = len(selected_harvest_ponds)
+                harvest_kg_clean = harvest_kg_input.strip()
+                # Harvest KG carries the pond count for this batch in brackets,
+                # e.g. "3000 (3)" for a 3000 KG harvest spread across 3 ponds —
+                # this is written identically onto every selected pond's row.
+                harvest_kg_final = f"{harvest_kg_clean} ({pond_count})" if harvest_kg_clean else ""
+                harvest_abw_clean = harvest_abw_input.strip()
+
+                saved_ponds, failed_ponds = [], []
+                for p in selected_harvest_ponds:
+                    latest_row = _latest_saved_row_for_pond(df_harvest_farm, p)
+                    if latest_row is None:
+                        failed_ponds.append(p)
+                        continue
+                    ts = str(latest_row.get("Timestamp") or "").strip()
+                    if not ts:
+                        failed_ponds.append(p)
+                        continue
+
+                    slot1_filled = bool(
+                        str(latest_row.get("Harvest Date") or "").strip()
+                        or str(latest_row.get("Harvest Type") or "").strip()
+                    )
+                    slot2_filled = bool(
+                        str(latest_row.get("Harvest Date 2") or "").strip()
+                        or str(latest_row.get("Harvest Type 2") or "").strip()
+                    )
+                    # Same per-pond slot logic as before: fill slot 1 if it's
+                    # still empty, otherwise slot 2 (re-editing slot 2 again if
+                    # both are already used).
+                    target_slot = 1 if not slot1_filled else 2
+
+                    ok = update_harvest_by_timestamp(
+                        ts, harvest_date_input.isoformat(), harvest_type,
+                        harvest_kg_final, harvest_abw_clean, slot=target_slot,
+                    )
+                    if ok:
+                        saved_ponds.append(p)
+                    else:
+                        failed_ponds.append(p)
+
+                if saved_ponds:
+                    st.success(
+                        f"✅ {harvest_type} saved for {len(saved_ponds)} pond(s) — "
+                        f"{harvest_date_input.isoformat()}: {', '.join(saved_ponds)}."
+                    )
+                    # Fire off ONE "New Harvest Record Alert" email covering the
+                    # whole batch (e.g. "Full H from 3 ponds"), plus the farm's
+                    # still-running / partially-harvested summary with today's
+                    # DOCs. This never blocks or fails the harvest save above —
+                    # if it's not configured yet, or the send fails, we just
+                    # show a small note and move on.
+                    _email_ok, _email_msg = send_harvest_alert(
+                        customer, farm, saved_ponds, harvest_type,
+                        harvest_date_input.isoformat(), harvest_kg_final, harvest_abw_clean,
+                    )
+                    if _email_ok:
+                        st.caption(f"📧 Alert email sent to {', '.join(HARVEST_ALERT_RECIPIENT)}")
+                    else:
+                        st.caption(f"⚠️ {_email_msg}")
+                if failed_ponds:
+                    st.error(f"❌ Could not save harvest for: {', '.join(failed_ponds)} (record not found).")
+                if saved_ponds:
+                    time.sleep(0.3)
+                    st.rerun()
+
+_harvest_fragment()
 
 # =========================================================================
 # STEP 6: COMPETITOR DETAILS — Date, a Yes/No toggle each for Competitor
@@ -1750,67 +1769,71 @@ st.markdown("#### 🕵️ Competitor Details")
 
 comp_scope = f"{customer}_{farm}"
 
-cd_col1, cd_col2 = st.columns(2)
-with cd_col1:
-    competitor_date_input = st.date_input(
-        "Date *", value=date.today(), key=f"competitor_date_{comp_scope}",
-    )
-with cd_col2:
-    st.caption(f"Customer: {customer}  \nFarm: {farm}")
-
-cd_col3, cd_col4 = st.columns(2)
-with cd_col3:
-    competitor_feeds_toggle = st.toggle(
-        "Competitor Feeds", value=False, key=f"competitor_feeds_{comp_scope}",
-        help="Toggle ON for Yes, OFF for No",
-    )
-with cd_col4:
-    competitor_health_toggle = st.toggle(
-        "Competitor Health Care Products", value=False, key=f"competitor_health_{comp_scope}",
-        help="Toggle ON for Yes, OFF for No",
-    )
-
-competitor_feeds_val = "Yes" if competitor_feeds_toggle else "No"
-competitor_health_val = "Yes" if competitor_health_toggle else "No"
-
-competitor_images = st.file_uploader(
-    "Upload Images (optional, multiple allowed)",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
-    key=f"competitor_images_{comp_scope}",
-)
-
-if st.button("✅ Submit Competitor Details", key=f"competitor_submit_{comp_scope}"):
-    if not customer or not farm or not zone or not area or not technician:
-        st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
-    else:
-        with st.spinner("Saving Competitor Details..."):
-            image_links = upload_images(competitor_images)
-            competitor_record = {
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                "Customer": customer,
-                "Farm Name with Code": farm,
-                "Zone": zone,
-                "Area": area,
-                "Technician": technician,
-                "Date": competitor_date_input.isoformat(),
-                "Competitor Feeds": competitor_feeds_val,
-                "Competitor Health Care Products": competitor_health_val,
-                "Image Links": ", ".join(image_links),
-            }
-            append_competitor_record(competitor_record)
-        st.success("✅ Competitor Details saved!")
-        _comp_ok, _comp_msg = send_competitor_alert(
-            customer, farm, zone, area, technician,
-            competitor_date_input.isoformat(),
-            competitor_feeds_val, competitor_health_val, image_links,
+@st.fragment
+def _competitor_fragment():
+    cd_col1, cd_col2 = st.columns(2)
+    with cd_col1:
+        competitor_date_input = st.date_input(
+            "Date *", value=date.today(), key=f"competitor_date_{comp_scope}",
         )
-        if _comp_ok:
-            st.caption(f"📧 Alert email sent to {', '.join(COMPETITOR_ALERT_RECIPIENTS)}")
+    with cd_col2:
+        st.caption(f"Customer: {customer}  \nFarm: {farm}")
+
+    cd_col3, cd_col4 = st.columns(2)
+    with cd_col3:
+        competitor_feeds_toggle = st.toggle(
+            "Competitor Feeds", value=False, key=f"competitor_feeds_{comp_scope}",
+            help="Toggle ON for Yes, OFF for No",
+        )
+    with cd_col4:
+        competitor_health_toggle = st.toggle(
+            "Competitor Health Care Products", value=False, key=f"competitor_health_{comp_scope}",
+            help="Toggle ON for Yes, OFF for No",
+        )
+
+    competitor_feeds_val = "Yes" if competitor_feeds_toggle else "No"
+    competitor_health_val = "Yes" if competitor_health_toggle else "No"
+
+    competitor_images = st.file_uploader(
+        "Upload Images (optional, multiple allowed)",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"competitor_images_{comp_scope}",
+    )
+
+    if st.button("✅ Submit Competitor Details", key=f"competitor_submit_{comp_scope}"):
+        if not customer or not farm or not zone or not area or not technician:
+            st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
         else:
-            st.caption(f"⚠️ {_comp_msg}")
-        time.sleep(1)
-        st.rerun()
+            with st.spinner("Saving Competitor Details..."):
+                image_links = upload_images(competitor_images)
+                competitor_record = {
+                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                    "Customer": customer,
+                    "Farm Name with Code": farm,
+                    "Zone": zone,
+                    "Area": area,
+                    "Technician": technician,
+                    "Date": competitor_date_input.isoformat(),
+                    "Competitor Feeds": competitor_feeds_val,
+                    "Competitor Health Care Products": competitor_health_val,
+                    "Image Links": ", ".join(image_links),
+                }
+                append_competitor_record(competitor_record)
+            st.success("✅ Competitor Details saved!")
+            _comp_ok, _comp_msg = send_competitor_alert(
+                customer, farm, zone, area, technician,
+                competitor_date_input.isoformat(),
+                competitor_feeds_val, competitor_health_val, image_links,
+            )
+            if _comp_ok:
+                st.caption(f"📧 Alert email sent to {', '.join(COMPETITOR_ALERT_RECIPIENTS)}")
+            else:
+                st.caption(f"⚠️ {_comp_msg}")
+            time.sleep(0.3)
+            st.rerun()
+
+_competitor_fragment()
 
 # =========================================================================
 # STEP 7: RETURN DETAILS — Date + Remark, saved to its own "ReturnDetails"
@@ -1821,42 +1844,46 @@ if st.button("✅ Submit Competitor Details", key=f"competitor_submit_{comp_scop
 st.markdown("---")
 st.markdown("#### 🔁 Return Details")
 
-rd_col1, rd_col2 = st.columns(2)
-with rd_col1:
-    return_date_input = st.date_input(
-        "Date *", value=date.today(), key=f"return_date_{comp_scope}",
-    )
-with rd_col2:
-    st.caption(f"Customer: {customer}  \nFarm: {farm}")
-
-return_remark_input = st.text_area("Remark", key=f"return_remark_{comp_scope}")
-
-if st.button("✅ Submit Return Details", key=f"return_submit_{comp_scope}"):
-    if not customer or not farm or not zone or not area or not technician:
-        st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
-    else:
-        return_record = {
-            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-            "Customer": customer,
-            "Farm Name with Code": farm,
-            "Zone": zone,
-            "Area": area,
-            "Technician": technician,
-            "Date": return_date_input.isoformat(),
-            "Remark": return_remark_input.strip(),
-        }
-        append_return_record(return_record)
-        st.success("✅ Return Details saved!")
-        _ret_ok, _ret_msg = send_return_alert(
-            customer, farm, zone, area, technician,
-            return_date_input.isoformat(), return_remark_input.strip(),
+@st.fragment
+def _return_fragment():
+    rd_col1, rd_col2 = st.columns(2)
+    with rd_col1:
+        return_date_input = st.date_input(
+            "Date *", value=date.today(), key=f"return_date_{comp_scope}",
         )
-        if _ret_ok:
-            st.caption(f"📧 Alert email sent to {', '.join(RETURN_ALERT_RECIPIENTS)}")
+    with rd_col2:
+        st.caption(f"Customer: {customer}  \nFarm: {farm}")
+
+    return_remark_input = st.text_area("Remark", key=f"return_remark_{comp_scope}")
+
+    if st.button("✅ Submit Return Details", key=f"return_submit_{comp_scope}"):
+        if not customer or not farm or not zone or not area or not technician:
+            st.error("❌ Please fill in all required top-level fields (marked with *) before submitting.")
         else:
-            st.caption(f"⚠️ {_ret_msg}")
-        time.sleep(1)
-        st.rerun()
+            return_record = {
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "Customer": customer,
+                "Farm Name with Code": farm,
+                "Zone": zone,
+                "Area": area,
+                "Technician": technician,
+                "Date": return_date_input.isoformat(),
+                "Remark": return_remark_input.strip(),
+            }
+            append_return_record(return_record)
+            st.success("✅ Return Details saved!")
+            _ret_ok, _ret_msg = send_return_alert(
+                customer, farm, zone, area, technician,
+                return_date_input.isoformat(), return_remark_input.strip(),
+            )
+            if _ret_ok:
+                st.caption(f"📧 Alert email sent to {', '.join(RETURN_ALERT_RECIPIENTS)}")
+            else:
+                st.caption(f"⚠️ {_ret_msg}")
+            time.sleep(0.3)
+            st.rerun()
+
+_return_fragment()
 
 # =========================================================================
 # FARM SUMMARY — every saved record for this Customer + Farm Name with
