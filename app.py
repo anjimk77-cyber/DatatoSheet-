@@ -366,6 +366,56 @@ def mark_deleted_by_timestamp(timestamp):
         ws.update_cell(cell.row, deleted_col_index, "Yes")
         bump_data_version()
 
+def mark_deleted_by_timestamps(timestamps):
+    """Batched soft-delete for one or MANY rows at once (e.g. when someone
+    selects several / all rows in the pond grid and deletes them together).
+    Reads the sheet ONCE and flags every matching row with a SINGLE batched
+    write, instead of one find + one update per row — deleting a whole
+    pond's records one API call at a time could hit Google's per-minute API
+    limit and fail halfway, leaving some rows deleted and some not.
+
+    Returns the set of timestamps that are safe to remove from the screen:
+    rows that were flagged now, plus rows that no longer exist in the sheet
+    (or are already flagged as deleted). Raises if the Google Sheets call
+    fails, so the caller can keep the rows on screen instead of hiding rows
+    that were never actually flagged."""
+    wanted = [str(t).strip() for t in timestamps if str(t).strip()]
+    if not wanted:
+        return set()
+    ws = get_worksheet()
+    deleted_col_index = COLUMN_ORDER.index("Deleted") + 1
+    all_values = ws.get_all_values()
+
+    # Timestamp -> sheet row numbers (1-based) not already flagged Deleted.
+    ts_rows = {}
+    for row_num, row_vals in enumerate(all_values[1:], start=2):
+        if not row_vals:
+            continue
+        key = str(row_vals[0]).strip()
+        if not key:
+            continue
+        already_deleted = (
+            len(row_vals) >= deleted_col_index
+            and str(row_vals[deleted_col_index - 1]).strip().lower() in ("yes", "true", "1")
+        )
+        if already_deleted:
+            continue
+        ts_rows.setdefault(key, []).append(row_num)
+
+    updates = []
+    for ts in wanted:
+        rows_for_ts = ts_rows.get(ts)
+        if rows_for_ts:
+            row_num = rows_for_ts.pop(0)
+            updates.append({
+                "range": rowcol_to_a1(row_num, deleted_col_index),
+                "values": [["Yes"]],
+            })
+    if updates:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+    bump_data_version()
+    return set(wanted)
+
 def update_harvest_by_timestamp(timestamp, harvest_date, harvest_type, harvest_kg="", harvest_abw="", slot=1):
     """Writes Harvest Date/Type/KG/ABW onto the existing saved row that
     matches this Timestamp (i.e. an existing Pond Details record), instead
@@ -995,6 +1045,51 @@ default_density = prev_density if prev_density else 0
 
 st.markdown(f"##### 📜 History — Pond {pond_number}" if pond_number else "##### 📜 History")
 
+def _load_pond_context(cust, frm, pond):
+    """Re-reads this pond's history from the Google Sheet (through the
+    normal cached/versioned load_data()) and re-derives the "previous row"
+    values (prev_date / prev_doc / ...) plus the new-row defaults.
+
+    Needed because the pond editor below is an @st.fragment: when a cell is
+    edited or a row is deleted, ONLY the fragment re-runs, and it would
+    otherwise keep using the pond history that was loaded during the last
+    FULL page run — so a row that was just deleted would still be in that
+    stale history and reappear on screen (and the DOC auto-calc would chain
+    off stale rows). Same logic as the block above, just callable."""
+    df_hist = load_data()
+    _req = {"Customer", "Farm Name with Code", "Pond Number"}
+    if pond and len(df_hist) > 0 and _req.issubset(df_hist.columns):
+        df_hist = df_hist[
+            (df_hist["Customer"] == cust)
+            & (df_hist["Farm Name with Code"] == frm)
+            & (df_hist["Pond Number"] == pond)
+        ].copy()
+    else:
+        df_hist = pd.DataFrame(columns=COLUMN_ORDER)
+
+    p_date = None
+    p_doc = None
+    p_species = None
+    p_cycle = None
+    p_density = None
+    if len(df_hist) > 0 and "Date" in df_hist.columns:
+        df_hist["_ParsedDate"] = pd.to_datetime(df_hist["Date"], errors="coerce")
+        df_hist = df_hist.sort_values(by="_ParsedDate").reset_index(drop=True)
+        if df_hist["_ParsedDate"].notna().any():
+            _latest_idx = df_hist["_ParsedDate"].last_valid_index()
+            p_date = df_hist.loc[_latest_idx, "_ParsedDate"].date()
+            p_doc = to_number(df_hist.loc[_latest_idx, "DOC"], as_int=True)
+            p_species = str(df_hist.loc[_latest_idx].get("Species Culture") or "").strip() or None
+            p_cycle = str(df_hist.loc[_latest_idx].get("Cycle Type") or "").strip() or None
+            p_density = to_number(df_hist.loc[_latest_idx, "Density"], as_int=True)
+            if p_cycle == "Soon to be":
+                p_date, p_doc = None, None
+
+    d_species = p_species if p_species in SPECIES_CULTURE else SPECIES_CULTURE[0]
+    d_cycle = p_cycle if p_cycle in CYCLE_TYPE else "Running"
+    d_density = p_density if p_density else 0
+    return df_hist, p_date, p_doc, p_species, p_cycle, p_density, d_species, d_cycle, d_density
+
 @st.fragment
 def _pond_editor_fragment():
     # Wrapped in @st.fragment so that editing a cell only reruns this piece
@@ -1011,6 +1106,15 @@ def _pond_editor_fragment():
     # ISSUES_SEP). The spreadsheet lets you pick more than one issue via a
     # single Multiselect column — so here the saved "Issues" string is
     # split back out into a Python list for display/editing.
+
+    # A fragment-only rerun (cell edit / row delete) does NOT re-execute the
+    # page script above, so the pond history variables it closes over would
+    # be whatever they were at the last FULL run — i.e. rows deleted a
+    # moment ago would still be in them and reappear in the grid. Refresh
+    # them here from the Google Sheet on every run of the fragment.
+    (df_pond_hist_full, prev_date, prev_doc, prev_species, prev_cycle, prev_density,
+     default_species, default_cycle, default_density) = _load_pond_context(customer, farm, pond_number)
+
     EDITOR_POND_COLS = ["Date", "DOC", "Density", "Feed Per Day", "ABW",
                          "Expect Harvest (KG)", "Survival QTY", "Survival Rate", "Species Culture",
                          "Cycle Type", "Issues", "Water Color", "Grade", "Remark"]
@@ -1124,7 +1228,15 @@ def _pond_editor_fragment():
                      "ABW", "Expect Harvest (KG)", "Survival QTY", "Survival Rate",
                      "Cycle Type", "Issues", "Water Color", "Grade", "Remark", "Status"]
 
-    editor_key = f"editor_{widget_scope}"
+    # The editor's key carries a small version number that is bumped ONLY
+    # when rows are deleted. A changed key makes Streamlit build a brand-new
+    # grid (clean front-end state) from our working copy, so the grid's old
+    # "row N was deleted" bookkeeping can never be re-applied on top of a
+    # table whose rows have already shifted. Normal typing never changes it,
+    # so the grid still doesn't reset while editing.
+    editor_ver_key = f"__pond_editor_ver_{widget_scope}"
+    delete_error_key = f"__pond_delete_error_{widget_scope}"
+    editor_key = f"editor_{widget_scope}_{st.session_state.get(editor_ver_key, 0)}"
     working_key = f"__pond_working_{widget_scope}"
     working_sig_key = f"__pond_working_sig_{widget_scope}"
     # Tracks how many trailing rows in `working_key` came from the widget's
@@ -1349,22 +1461,50 @@ def _pond_editor_fragment():
 
         st.session_state[added_count_key] = len(added_rows)
 
-        for idx in sorted(deleted_rows, reverse=True):
-            if idx < len(df):
-                ts = str(df.at[idx, "Timestamp"]).strip()
-                if ts:
-                    # Already-saved row: soft-delete in the Google Sheet
-                    # (flags it, keeps the underlying data), then remove it
-                    # from the screen — it will stay gone after a refresh.
-                    mark_deleted_by_timestamp(ts)
-                df = df.drop(index=idx).reset_index(drop=True)
-                # A deleted row is gone for good — if it happened to be
-                # one of the still-pending "added" rows, don't let a
-                # later on_change try to re-append it from added_rows.
-                if idx >= len(df) - st.session_state.get(added_count_key, 0):
-                    st.session_state[added_count_key] = max(
-                        0, st.session_state.get(added_count_key, 0) - 1
+        if deleted_rows:
+            # Row deletion. Saved rows are soft-deleted in the Google Sheet
+            # (flagged, data kept) in ONE batched call — never one call per
+            # row — and only rows that were really flagged (or no longer
+            # exist in the sheet) are removed from the screen. If the sheet
+            # update fails, the rows stay on screen and an error is shown
+            # instead of the callback crashing half-way.
+            _del_positions = []
+            for _d in deleted_rows:
+                _d = int(_d)
+                if _d < len(df) and _d not in _del_positions:
+                    _del_positions.append(_d)
+
+            _ts_to_flag = []
+            for _d in _del_positions:
+                _ts = str(df.at[_d, "Timestamp"]).strip()
+                if _ts:
+                    _ts_to_flag.append(_ts)
+
+            _safe_to_remove = set()
+            if _ts_to_flag:
+                try:
+                    _safe_to_remove = mark_deleted_by_timestamps(_ts_to_flag)
+                except Exception as _del_err:
+                    st.session_state[delete_error_key] = (
+                        "❌ Could not delete the selected record(s) from the Google Sheet "
+                        f"(they were NOT deleted — please try again in a moment). Details: {_del_err}"
                     )
+
+            _drop_positions = []
+            for _d in _del_positions:
+                _ts = str(df.at[_d, "Timestamp"]).strip()
+                if (not _ts) or (_ts in _safe_to_remove):
+                    _drop_positions.append(_d)
+            if _drop_positions:
+                df = df.drop(index=_drop_positions).reset_index(drop=True)
+
+            # After a delete, every row left in `df` (including any not-yet-
+            # saved ones that were pending in added_rows) becomes plain
+            # base data of a freshly built grid, so nothing is "pending
+            # from added_rows" any more, and the grid gets a new key so it
+            # starts with clean front-end state.
+            st.session_state[added_count_key] = 0
+            st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
 
         if needs_recompute:
             df = _normalize_pond_dtypes(df)
@@ -1380,6 +1520,10 @@ def _pond_editor_fragment():
         state["edited_rows"] = {}
         state["added_rows"] = []
         state["deleted_rows"] = []
+
+    _delete_error_msg = st.session_state.pop(delete_error_key, None)
+    if _delete_error_msg:
+        st.error(_delete_error_msg)
 
     edited_df = st.data_editor(
         st.session_state[working_key],
