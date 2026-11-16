@@ -1513,13 +1513,39 @@ def _pond_editor_fragment():
             df = _recompute_status(df)
 
         st.session_state[working_key] = df
-        # Clear only the widget's own edit-tracking (not the whole widget
-        # state) so the grid doesn't get fully remounted on every keystroke
-        # — that remount was what reset the scroll position/focus after
-        # each cell edit.
-        state["edited_rows"] = {}
-        state["added_rows"] = []
-        state["deleted_rows"] = []
+        # FIX: newer Streamlit versions return the data_editor's state as an
+        # object that does NOT allow item assignment, so the old
+        #     state["edited_rows"] = {} ; state["added_rows"] = [] ; ...
+        # raised "TypeError" here. We still want to clear the widget's own
+        # edit-tracking IN PLACE (so the grid is NOT remounted and keeps its
+        # scroll position/focus). Try plain assignment first; if the state
+        # object refuses it, empty the inner dict/lists in place instead.
+        try:
+            state["edited_rows"] = {}
+            state["added_rows"] = []
+            state["deleted_rows"] = []
+        except TypeError:
+            for _k in ("edited_rows", "added_rows", "deleted_rows"):
+                try:
+                    state[_k].clear()
+                except Exception:
+                    pass
+
+        # Verify the clearing really stuck. Only if it did NOT (so the widget
+        # would re-apply the same edits / re-add the same rows on top of our
+        # working copy) fall back to giving the grid a fresh key. In the
+        # normal case no remount happens.
+        _check = st.session_state.get(editor_key) or {}
+        _still_pending = False
+        try:
+            _still_pending = bool(
+                _check.get("edited_rows") or _check.get("added_rows") or _check.get("deleted_rows")
+            )
+        except Exception:
+            _still_pending = True
+        if _still_pending:
+            st.session_state[added_count_key] = 0
+            st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
 
     _delete_error_msg = st.session_state.pop(delete_error_key, None)
     if _delete_error_msg:
