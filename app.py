@@ -1513,13 +1513,19 @@ def _pond_editor_fragment():
             df = _recompute_status(df)
 
         st.session_state[working_key] = df
-        # Clear only the widget's own edit-tracking (not the whole widget
-        # state) so the grid doesn't get fully remounted on every keystroke
-        # — that remount was what reset the scroll position/focus after
-        # each cell edit.
-        state["edited_rows"] = {}
-        state["added_rows"] = []
-        state["deleted_rows"] = []
+        # FIX: newer Streamlit versions return the data_editor's state as a
+        # read-only object, so the old in-place clearing
+        #     state["edited_rows"] = {} ; state["added_rows"] = [] ; ...
+        # raised "TypeError" (it crashed right here, after a row delete),
+        # and the crash also meant new rows weren't reliably kept, which is
+        # why Save then said "Add at least one new row before saving".
+        # Instead of mutating the widget's state, everything the widget
+        # tracked has now been folded into `df` (our working copy), so we
+        # simply give the grid a fresh key. The next run builds a clean
+        # grid from `df` with nothing pending, so nothing can be applied
+        # twice (no duplicate rows, no stale row-index bookkeeping).
+        st.session_state[added_count_key] = 0
+        st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
 
     _delete_error_msg = st.session_state.pop(delete_error_key, None)
     if _delete_error_msg:
