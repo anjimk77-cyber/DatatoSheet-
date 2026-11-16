@@ -1364,93 +1364,65 @@ def _pond_editor_fragment():
         )
         return df
 
-    # Keep our own persistent copy of the table (separate from the widget's
-    # internal state). `editor_df` above was just rebuilt from a fresh
-    # Google Sheet read, so it always holds the latest values for every
-    # already-saved row. Switching pond/farm/customer starts a clean copy;
-    # staying on the same pond keeps any new/unsaved rows the user is
-    # entering, but always swaps in this fresh `editor_df` for the saved
-    # rows — so an edit made directly in the Google Sheet (e.g. a
-    # corrected Density) shows up right away instead of being stuck on
-    # whatever value the app first loaded.
+    # ------------------------------------------------------------------
+    # HOW THE GRID STATE IS HANDLED (no remount while editing)
+    #
+    # Newer Streamlit versions do not allow clearing the data_editor's own
+    # edit-tracking (edited_rows / added_rows / deleted_rows) from code, so
+    # we no longer try. Instead:
+    #   * The grid is always given the SAME base table on every run: the
+    #     saved rows from the Google Sheet (+ any "carried over" unsaved
+    #     rows, see below). The grid itself keeps remembering the user's
+    #     edits and newly added rows, exactly like a normal data_editor, so
+    #     typing never remounts it and it keeps its scroll position/focus.
+    #   * After the grid is drawn, our own "logical" table (base + the
+    #     grid's edits/added rows, with DOC / Expect Harvest / Survival
+    #     auto-calculated) is rebuilt from scratch from the grid's state
+    #     and stored in working_key. Save reads that table. Because it is
+    #     rebuilt from scratch every run, nothing can be applied twice and
+    #     no duplicate rows can appear.
+    #   * The grid is remounted (new key) ONLY when rows are deleted — or
+    #     when someone tries to edit an already-saved (locked) row, so the
+    #     grid snaps back. Unsaved rows survive that remount: they are
+    #     carried over in pending_key and become part of the new base.
+    # ------------------------------------------------------------------
+    pending_key = f"__pond_pending_{widget_scope}"
+    base_key = f"__pond_base_{widget_scope}"
     switch_signature = (customer, farm, pond_number)
-    if st.session_state.get(working_sig_key) != switch_signature:
-        st.session_state[working_key] = editor_df.copy()
-        st.session_state[working_sig_key] = switch_signature
-        st.session_state[added_count_key] = 0
-        if editor_key in st.session_state:
-            del st.session_state[editor_key]
-    else:
-        existing_working = st.session_state.get(working_key)
-        if existing_working is not None:
-            unsaved_rows = existing_working[
-                existing_working["Timestamp"].astype(str).str.strip() == ""
-            ].copy()
-            st.session_state[working_key] = pd.concat(
-                [editor_df.copy(), unsaved_rows], ignore_index=True
-            )
-        else:
-            st.session_state[working_key] = editor_df.copy()
-        # NOTE: deliberately NOT deleting st.session_state[editor_key] here.
-        # This branch runs on every rerun while staying on the same pond
-        # (including the rerun right after a cell edit). apply_editor_changes
-        # already folds edits into working_key and clears the widget's own
-        # edited_rows/added_rows/deleted_rows in place, so the widget's
-        # tracked state is already consistent with working_key. Deleting the
-        # key here forced st.data_editor to remount from scratch on every
-        # keystroke, which is what reset the grid's scroll position/focus.
+    st.session_state[working_sig_key] = switch_signature
 
-    def apply_editor_changes():
-        """on_change callback: fold whatever was just typed into our working
-        copy, but IGNORE any attempted edit/delete on a row that's already
-        saved (non-blank Timestamp) — those are locked.
-
-        DOC auto-calc and the Status column only ever depend on the Date/DOC
-        chain and on rows being added/removed; Expect Harvest (KG) / Survival
-        QTY / Survival Rate only depend on that same row's ABW / Feed Per Day
-        / Species Culture / Density. So we only run the full rebuild
-        (_normalize_pond_dtypes / _recompute_docs / _recompute_harvest_survival
-        / _recompute_status) when one of those actually happened. A plain
-        edit to any other column (Cycle, Water Color, Grade, Remark, Issues)
-        just patches that one cell in place on the SAME dataframe object
-        instead of rebuilding a fresh one — passing a materially-identical
-        dataframe back into the grid on every keystroke was what made it
-        reset its scroll position back to the first columns each time."""
-        state = st.session_state.get(editor_key)
-        if not state:
-            return
-
-        edited_rows = state.get("edited_rows", {})
-        added_rows = state.get("added_rows", [])
-        deleted_rows = state.get("deleted_rows", [])
-
-        RECOMPUTE_TRIGGER_COLS = ("Date", "DOC", "ABW", "Feed Per Day", "Species Culture", "Cycle Type", "Density")
-        needs_recompute = bool(added_rows) or bool(deleted_rows) or any(
-            any(col in changes for col in RECOMPUTE_TRIGGER_COLS) for changes in edited_rows.values()
+    _pending_rows = st.session_state.get(pending_key)
+    if _pending_rows is not None and len(_pending_rows) > 0:
+        base_df = pd.concat(
+            [editor_df, _pending_rows.reindex(columns=editor_df.columns)], ignore_index=True
         )
+        base_df = _normalize_pond_dtypes(base_df)
+        base_df = _recompute_status(base_df)
+    else:
+        base_df = editor_df.copy()
+    # Remember exactly what the grid was given, so the on_change callback
+    # (which runs before the next rerun) can rebuild the logical table
+    # from the same base.
+    st.session_state[base_key] = base_df.copy()
 
-        df = st.session_state[working_key]
-        df.reset_index(drop=True, inplace=True)
+    def _logical_from_state(base, state):
+        """Base table + the grid's current edits / added rows. Returns
+        (df, rejected) where `rejected` is True if someone tried to edit an
+        already-saved (locked) row — that edit is ignored here."""
+        df = base.copy().reset_index(drop=True)
+        rejected = False
+        edited_rows = state.get("edited_rows", {}) or {}
+        added_rows = state.get("added_rows", []) or []
 
         for idx, changes in edited_rows.items():
             idx = int(idx)
             if idx < len(df):
                 if str(df.at[idx, "Timestamp"]).strip():
-                    continue  # locked: already saved, ignore the edit
+                    rejected = True  # locked: already saved, ignore the edit
+                    continue
                 for col, val in changes.items():
                     if col in df.columns and col not in ("Timestamp", "Status"):
                         df.at[idx, col] = val
-
-        # `added_rows` is Streamlit's running list of new rows, not a
-        # delta since the last on_change — the same not-yet-committed row
-        # reappears here (with more fields filled in) every time another
-        # of its cells is edited. Remove whatever we appended from it on
-        # the previous run before appending the current list, so a
-        # not-yet-saved row is only ever represented once in `df` instead
-        # of accumulating a duplicate on every keystroke.
-        prev_added_len = st.session_state.get(added_count_key, 0)
-        if prev_added_len:
-            df = df.iloc[: max(0, len(df) - prev_added_len)].reset_index(drop=True)
 
         for new_row in added_rows:
             row = {c: new_row.get(c) for c in df.columns}
@@ -1458,16 +1430,29 @@ def _pond_editor_fragment():
             if not isinstance(row.get("Issues"), list):
                 row["Issues"] = []
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        return df, rejected
 
-        st.session_state[added_count_key] = len(added_rows)
+    def apply_editor_changes():
+        """on_change callback. Normal edits / added rows need nothing here
+        (the logical table is rebuilt after the grid is drawn). This only
+        handles the two cases that need a remount:
+          1) rows were deleted -> saved rows are soft-deleted in the Google
+             Sheet (flagged, data kept) in ONE batched call, and only rows
+             that were really flagged are removed from the screen;
+          2) an edit was attempted on an already-saved row -> the grid is
+             remounted so that locked row snaps back to its saved value.
+        Unsaved rows are carried over into the new grid via pending_key."""
+        state = st.session_state.get(editor_key)
+        base = st.session_state.get(base_key)
+        if not state or base is None:
+            return
+
+        df, rejected = _logical_from_state(base, state)
+        deleted_rows = state.get("deleted_rows", []) or []
+        if not deleted_rows and not rejected:
+            return
 
         if deleted_rows:
-            # Row deletion. Saved rows are soft-deleted in the Google Sheet
-            # (flagged, data kept) in ONE batched call — never one call per
-            # row — and only rows that were really flagged (or no longer
-            # exist in the sheet) are removed from the screen. If the sheet
-            # update fails, the rows stay on screen and an error is shown
-            # instead of the callback crashing half-way.
             _del_positions = []
             for _d in deleted_rows:
                 _d = int(_d)
@@ -1498,35 +1483,24 @@ def _pond_editor_fragment():
             if _drop_positions:
                 df = df.drop(index=_drop_positions).reset_index(drop=True)
 
-            # After a delete, every row left in `df` (including any not-yet-
-            # saved ones that were pending in added_rows) becomes plain
-            # base data of a freshly built grid, so nothing is "pending
-            # from added_rows" any more, and the grid gets a new key so it
-            # starts with clean front-end state.
-            st.session_state[added_count_key] = 0
-            st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
+        df = _normalize_pond_dtypes(df)
+        df = _recompute_docs(df, prev_date, prev_doc)
+        df = _recompute_harvest_survival(df)
+        df = _recompute_status(df)
 
-        if needs_recompute:
-            df = _normalize_pond_dtypes(df)
-            df = _recompute_docs(df, prev_date, prev_doc)
-            df = _recompute_harvest_survival(df)
-            df = _recompute_status(df)
-
+        # Carry the not-yet-saved rows over into the freshly built grid, and
+        # give the grid a new key so it starts with clean front-end state.
+        st.session_state[pending_key] = df[df["Timestamp"].astype(str).str.strip() == ""].copy()
         st.session_state[working_key] = df
-        # Clear only the widget's own edit-tracking (not the whole widget
-        # state) so the grid doesn't get fully remounted on every keystroke
-        # — that remount was what reset the scroll position/focus after
-        # each cell edit.
-        state["edited_rows"] = {}
-        state["added_rows"] = []
-        state["deleted_rows"] = []
+        st.session_state[added_count_key] = 0
+        st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
 
     _delete_error_msg = st.session_state.pop(delete_error_key, None)
     if _delete_error_msg:
         st.error(_delete_error_msg)
 
     edited_df = st.data_editor(
-        st.session_state[working_key],
+        base_df,
         column_config=column_config,
         column_order=column_order,
         num_rows="dynamic",
@@ -1535,6 +1509,16 @@ def _pond_editor_fragment():
         key=editor_key,
         on_change=apply_editor_changes,
     )
+
+    # Rebuild our logical table (what Save will read) from the base table +
+    # whatever the grid currently holds, with the auto-calculated columns.
+    _grid_state_now = st.session_state.get(editor_key) or {}
+    _working_df, _ = _logical_from_state(base_df, _grid_state_now)
+    _working_df = _normalize_pond_dtypes(_working_df)
+    _working_df = _recompute_docs(_working_df, prev_date, prev_doc)
+    _working_df = _recompute_harvest_survival(_working_df)
+    _working_df = _recompute_status(_working_df)
+    st.session_state[working_key] = _working_df
 
     saving_flag_key = f"__saving_{widget_scope}"
     save_in_progress = st.session_state.get(saving_flag_key, False)
@@ -1734,8 +1718,9 @@ def _pond_editor_fragment():
             append_records(new_records)
 
             st.success(f"✅ Saved {len(new_records)} new record(s) for Pond {pond_number}!")
-            del st.session_state[working_key]
-            del st.session_state[working_sig_key]
+            st.session_state.pop(working_key, None)
+            st.session_state.pop(working_sig_key, None)
+            st.session_state.pop(pending_key, None)
             st.session_state[added_count_key] = 0
             if editor_key in st.session_state:
                 del st.session_state[editor_key]
