@@ -976,6 +976,351 @@ with col4:
 technician = st.selectbox("Technician *", TECHNICIAN_OPTIONS, key="technician_select")
 
 # =========================================================================
+# POND LAYOUT — one card per Pond Number (that pond's most recent saved
+# record) for the selected Customer + Farm. (Moved up: now shown right
+# after "Enter Water Quality Data" and before "Pond Details".) Same cards
+# as the manager app (manager.py): big DOC Today / Full H / Soon to be
+# status, Stocking Density, L.V.D (that pond's own saved Date), Feed/Day,
+# ABW, Expecting Harvest (KG) / Harvest Weight, Survival Rate, Issues, and
+# the pond's Total Harvest KG. Always reads fresh from the Google Sheet
+# via load_data(), so it reflects new saves, direct Sheet edits and
+# soft-deletes. View only — nothing here writes to the Sheet.
+# =========================================================================
+import re
+
+st.markdown("---")
+st.markdown(f"#### 🟦 Pond Layout — {farm}")
+
+df_farm_summary = load_data()
+_farm_required = {"Customer", "Farm Name with Code"}
+if len(df_farm_summary) > 0 and _farm_required.issubset(df_farm_summary.columns):
+    df_farm_summary = df_farm_summary[
+        (df_farm_summary["Customer"] == customer) & (df_farm_summary["Farm Name with Code"] == farm)
+    ].copy()
+else:
+    df_farm_summary = pd.DataFrame(columns=COLUMN_ORDER)
+
+if len(df_farm_summary) > 0 and "Pond Number" in df_farm_summary.columns and "Date" in df_farm_summary.columns:
+
+    # "DOC Today" = this row's saved DOC + however many days have passed
+    # between its Date and today. Rows whose Cycle Type is "Soon to be"
+    # stay 0. A row with a Full Harvest stops advancing at its Full
+    # Harvest date.
+    def _compute_doc_today(row):
+        if str(row.get("Cycle Type") or "").strip() == "Soon to be":
+            return "0"
+        parsed = pd.to_datetime(row.get("Date"), errors="coerce")
+        if pd.isna(parsed):
+            return ""
+        try:
+            doc_num = int(float(row.get("DOC")))
+        except (TypeError, ValueError):
+            return ""
+        _t2 = str(row.get("Harvest Type 2", "")).strip().lower()
+        _t1 = str(row.get("Harvest Type", "")).strip().lower()
+        _full_harvest_date_str = ""
+        if "full" in _t2:
+            _full_harvest_date_str = str(row.get("Harvest Date 2", "")).strip()
+        elif "full" in _t1:
+            _full_harvest_date_str = str(row.get("Harvest Date", "")).strip()
+        if _full_harvest_date_str:
+            _full_harvest_date = pd.to_datetime(_full_harvest_date_str, errors="coerce")
+            if pd.notna(_full_harvest_date):
+                return str(doc_num + (_full_harvest_date - parsed).days)
+        days_passed = (pd.Timestamp(date.today()) - parsed).days
+        return str(doc_num + days_passed)
+
+    df_farm_summary["DOC Today"] = df_farm_summary.apply(_compute_doc_today, axis=1)
+
+    # ---- Current-season helpers ------------------------------------------
+    # A pond can be re-stocked after a Full H (new season) while its old
+    # rows stay in the Sheet. A pond's history is cut at its LAST Full H:
+    # only rows saved AFTER it belong to the current season.
+    def _current_season_rows(group):
+        g = group.sort_values("Timestamp", kind="mergesort").reset_index(drop=True)
+        full_flag = (
+            g["Harvest Type"].astype(str).str.lower().str.contains("full")
+            | g["Harvest Type 2"].astype(str).str.lower().str.contains("full")
+        )
+        full_positions = [i for i, f in enumerate(full_flag.tolist()) if f]
+        if full_positions:
+            g = g.iloc[full_positions[-1] + 1:]
+        return g
+
+    def _has_partial_current_season(group):
+        g = _current_season_rows(group)
+        return bool((
+            g["Harvest Type"].astype(str).str.lower().str.contains("partial")
+            | g["Harvest Type 2"].astype(str).str.lower().str.contains("partial")
+        ).any())
+
+    _pond_latest = (
+        df_farm_summary.assign(_PondSortDate=pd.to_datetime(df_farm_summary["Date"], errors="coerce"))
+        .dropna(subset=["_PondSortDate"])
+        .sort_values("_PondSortDate")
+        .groupby("Pond Number", as_index=False)
+        .last()
+        .sort_values("Pond Number")
+    )
+
+    def _escape_html_pond(v):
+        return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _pond_harvest_type(prow):
+        return str(prow.get("Harvest Type 2", "")).strip() or str(prow.get("Harvest Type", "")).strip()
+
+    # A pond keeps showing Partial H if it had a Partial harvest in its
+    # CURRENT SEASON (rows after its last Full H) — not just its most
+    # recent row. Full H only reflects the pond's latest record.
+    _partial_history_by_pond = {
+        _pn: _has_partial_current_season(_g)
+        for _pn, _g in df_farm_summary.groupby("Pond Number")
+    }
+
+    # A Harvest KG cell is normally a plain number, but a multi-pond
+    # harvest is entered as the COMBINED total with the pond count in
+    # brackets, e.g. "2000 (2)" -> each pond's share = 2000 / 2 = 1000.
+    def _parse_pond_harvest_kg(raw_value):
+        _s = str(raw_value).strip()
+        if not _s:
+            return float("nan")
+        _match = re.match(r"^([\d,]+(?:\.\d+)?)\s*\(\s*(\d+)\s*\)\s*$", _s)
+        if _match:
+            _total = pd.to_numeric(_match.group(1).replace(",", ""), errors="coerce")
+            _count = pd.to_numeric(_match.group(2), errors="coerce")
+            if pd.notna(_total) and pd.notna(_count) and _count > 0:
+                return _total / _count
+            return float("nan")
+        return pd.to_numeric(_s.replace(",", ""), errors="coerce")
+
+    # Total Harvest KG per pond — summed across every harvest slot (with a
+    # filled-in Type) of the pond's CURRENT season rows.
+    def _harvest_kg_sum_row(row):
+        _row_total = 0.0
+        _t1 = str(row.get("Harvest Type", "")).strip()
+        _kg1 = _parse_pond_harvest_kg(row.get("Harvest KG", ""))
+        if _t1 and pd.notna(_kg1):
+            _row_total += _kg1
+        _t2 = str(row.get("Harvest Type 2", "")).strip()
+        _kg2 = _parse_pond_harvest_kg(row.get("Harvest KG 2", ""))
+        if _t2 and pd.notna(_kg2):
+            _row_total += _kg2
+        return _row_total
+
+    # The "Total: X KG" on a card counts the harvests of the pond's CURRENT
+    # season only, so a restocked pond doesn't carry the previous season's
+    # harvest total.
+    def _display_season_rows(group):
+        g = group.sort_values("Timestamp", kind="mergesort").reset_index(drop=True)
+        _full_flag = (
+            g["Harvest Type"].astype(str).str.lower().str.contains("full")
+            | g["Harvest Type 2"].astype(str).str.lower().str.contains("full")
+        )
+        _full_pos = [i for i, f in enumerate(_full_flag.tolist()) if f]
+        if not _full_pos:
+            return g
+        if _full_pos[-1] == len(g) - 1:
+            _start = _full_pos[-2] + 1 if len(_full_pos) > 1 else 0
+            return g.iloc[_start:]
+        return g.iloc[_full_pos[-1] + 1:]
+
+    _total_harvest_kg_by_pond = {
+        _pn: sum(_harvest_kg_sum_row(_r) for _, _r in _display_season_rows(_g).iterrows())
+        for _pn, _g in df_farm_summary.groupby("Pond Number")
+    }
+
+    def _pond_status(prow):
+        _pond_no_status = prow.get("Pond Number", "")
+        _h_type_lower = _pond_harvest_type(prow).lower()
+        _has_partial_history = bool(_partial_history_by_pond.get(_pond_no_status, False))
+        if "full" in _h_type_lower:
+            return "Full H"
+        elif "partial" in _h_type_lower or _has_partial_history:
+            return "Partial H"
+        elif str(prow.get("Cycle Type", "")).strip() == "Soon to be":
+            return "Soon to be"
+        else:
+            return "Running"
+
+    def _pond_box_color(prow):
+        _status = _pond_status(prow)
+        if _status == "Partial H":
+            return "#fff3cd"  # yellow — Partial Harvest
+        elif _status == "Full H":
+            return "#d4edda"  # green — Full Harvest
+        elif _status == "Soon to be":
+            return "#e2e2e2"  # gray — cycle hasn't started yet
+        else:
+            return "#eaf4ff"  # default blue — no harvest yet
+
+    def _species_letter(prow):
+        _species = str(prow.get("Species Culture", "")).strip().lower()
+        if "vannamei" in _species:
+            return "V"
+        elif "monodon" in _species:
+            return "M"
+        else:
+            return ""
+
+    _pond_boxes_html = ""
+    for _, _prow in _pond_latest.iterrows():
+        _pond_no = _escape_html_pond(_prow.get("Pond Number", ""))
+        _box_color = _pond_box_color(_prow)
+        _status_box = _pond_status(_prow)
+
+        # ---- Detail lines shown on every card: Stocking Density, L.V.D
+        # (this pond's own saved Date), Feed/Day, ABW.
+        _density_val = pd.to_numeric(_prow.get("Density", ""), errors="coerce")
+        _density_str = f"{_density_val:,.0f}" if pd.notna(_density_val) else "-"
+        _lvd_str = _escape_html_pond(str(_prow.get("Date", "")).strip() or "-")
+        _feed_day_str = _escape_html_pond(_prow.get("Feed Per Day", "") or "-")
+        _abw_str = _escape_html_pond(_prow.get("ABW", "") or "-")
+        _extra_details_html = (
+            "<div style='font-size:0.85rem;color:#333;text-align:left;width:100%;"
+            "padding:0 8px;margin-top:4px;line-height:1.4;'>"
+            f"<div>Stocking Density - {_density_str}</div>"
+            f"<div>L.V.D - {_lvd_str}</div>"
+            f"<div>Feed/Day - {_feed_day_str} &nbsp;|&nbsp; ABW - {_abw_str}</div>"
+            "</div>"
+        )
+
+        # Issues (from this pond's latest saved record) — shown at the
+        # bottom inside the box, issue text in red.
+        _issues_val = str(_prow.get("Issues", "")).strip()
+        _issues_html = (
+            "<div style='margin-top:auto;width:100%;text-align:center;font-size:0.85rem;"
+            "font-weight:bold;border-top:1px dashed #bbb;padding-top:3px;'>"
+            "<span style='color:#333;'></span>"
+            f"<span style='color:red;'>{_escape_html_pond(_issues_val)}</span></div>"
+            if _issues_val and _issues_val.lower() != "nan" else ""
+        )
+
+        if _status_box == "Full H":
+            # Full H ponds: show "Full H" + its Harvest Date, plus the
+            # pond's Total Harvest KG instead of DOC Today.
+            _h_date = str(_prow.get("Harvest Date 2", "")).strip() or str(_prow.get("Harvest Date", "")).strip()
+            _h_date = _escape_html_pond(_h_date or "-")
+            _total_kg_box = _total_harvest_kg_by_pond.get(_prow.get("Pond Number", ""), 0)
+            _total_kg_html = (
+                f"<div style='font-size:0.75rem;color:#333;'>Total: {_total_kg_box:,.2f} KG</div>"
+                if _total_kg_box else ""
+            )
+            _box_middle_html = (
+                "<div style='font-size:1.2rem;font-weight:bold;color:red;'>Full H</div>"
+                f"<div style='font-size:0.75rem;color:#333;'>Harvest Date - {_h_date}</div>"
+                f"{_total_kg_html}"
+            )
+        elif _status_box == "Soon to be":
+            _box_middle_html = (
+                "<div style='font-size:1.1rem;font-weight:bold;color:#555;'>Soon to be</div>"
+            )
+        else:
+            # Running / Partial H ponds: DOC Today number, with the pond's
+            # Started Date (today minus DOC Today days) under it. Partial H
+            # ponds also show the Total Harvest KG so far.
+            if _status_box == "Partial H":
+                _total_kg_box = _total_harvest_kg_by_pond.get(_prow.get("Pond Number", ""), 0)
+                _total_kg_html = (
+                    f"<div style='font-size:0.7rem;color:#333;'>Total: {_total_kg_box:,.2f} KG</div>"
+                    if _total_kg_box else ""
+                )
+            else:
+                _total_kg_html = ""
+
+            _doc_today_raw = _prow.get("DOC Today", "")
+            _doc_today_val = _escape_html_pond(_doc_today_raw or "-")
+            try:
+                _started_date = (
+                    pd.Timestamp(date.today()) - pd.Timedelta(days=int(float(_doc_today_raw)))
+                ).strftime("%Y-%m-%d")
+            except (TypeError, ValueError):
+                _started_label = "Started on ---"
+                _started_date = None
+            if _started_date is not None:
+                _started_label = f"Started on {_started_date}"
+            _box_middle_html = (
+                f"<div style='font-size:1.4rem;font-weight:bold;color:red;'>{_doc_today_val}</div>"
+                f"<div style='font-size:0.7rem;color:#777;'>{_escape_html_pond(_started_label)}</div>"
+                f"{_total_kg_html}"
+            )
+
+        # Expecting Harvest (KG) / Harvest Weight line ("2nd slot wins").
+        if _status_box == "Full H":
+            _t2_expect = str(_prow.get("Harvest Type 2", "")).strip().lower()
+            _kg2_expect = _parse_pond_harvest_kg(_prow.get("Harvest KG 2", ""))
+            _kg1_expect = _parse_pond_harvest_kg(_prow.get("Harvest KG", ""))
+            _harvest_kg_val = _kg2_expect if ("full" in _t2_expect and pd.notna(_kg2_expect)) else _kg1_expect
+            _expect_label = "Harvest Weight"
+            _expect_val = f"{_harvest_kg_val:,.2f} KG" if pd.notna(_harvest_kg_val) else "-"
+        elif _status_box == "Soon to be":
+            _expect_label = "Expecting Harvest"
+            _expect_val = "-"
+        else:
+            _expect_label = "Expecting Harvest"
+            _expect_kg = pd.to_numeric(_prow.get("Expect Harvest (KG)", ""), errors="coerce")
+            _expect_val = f"{_expect_kg:,.2f} KG" if pd.notna(_expect_kg) else "-"
+
+        _expect_html = (
+            "<div style='font-size:0.85rem;color:#333;text-align:center;width:100%;margin-top:4px;"
+            "border-top:1px dashed #bbb;padding-top:3px;'>"
+            f"<b>{_expect_label}:</b> {_escape_html_pond(_expect_val)}</div>"
+        )
+
+        # Survival Rate line — Survival QTY as a percentage of this pond's
+        # Density. Blank/zero/non-numeric values show "-".
+        _density_for_survival = pd.to_numeric(_prow.get("Density", ""), errors="coerce")
+        _survival_qty_val = pd.to_numeric(_prow.get("Survival QTY", ""), errors="coerce")
+        if pd.notna(_density_for_survival) and _density_for_survival > 0 and pd.notna(_survival_qty_val):
+            _survival_rate_str = f"{(_survival_qty_val / _density_for_survival) * 100:,.2f}%"
+        else:
+            _survival_rate_str = "-"
+        _survival_rate_html = (
+            "<div style='font-size:0.85rem;color:#333;text-align:center;width:100%;margin-top:2px;'>"
+            f"<b>Survival Rate:</b> {_escape_html_pond(_survival_rate_str)}</div>"
+        )
+
+        _species_label = _species_letter(_prow)
+        _species_html = (
+            f"<div style='font-size:0.75rem;font-weight:bold;color:#444;margin-top:2px;'>{_species_label}</div>"
+            if _species_label else ""
+        )
+
+        _pond_boxes_html += (
+            "<div style='display:flex;flex-direction:column;align-items:center;margin:6px;'>"
+            f"<div style='position:relative;width:210px;min-height:175px;border:2px solid #333;"
+            "border-radius:6px;display:flex;flex-direction:column;align-items:center;"
+            f"justify-content:flex-start;padding:8px 0;background:{_box_color};'>"
+            f"<div style='font-size:0.8rem;color:#555;'>Pond {_pond_no}</div>"
+            f"{_box_middle_html}"
+            f"{_expect_html}"
+            f"{_survival_rate_html}"
+            f"{_extra_details_html}"
+            f"{_issues_html}"
+            "</div>"
+            f"{_species_html}"
+            "</div>"
+        )
+
+    st.markdown(
+        "<div style='display:flex;gap:18px;justify-content:center;margin-bottom:8px;font-size:0.85rem;'>"
+        "<div><span style='display:inline-block;width:14px;height:14px;background:#eaf4ff;"
+        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Running</div>"
+        "<div><span style='display:inline-block;width:14px;height:14px;background:#fff3cd;"
+        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Partial H</div>"
+        "<div><span style='display:inline-block;width:14px;height:14px;background:#d4edda;"
+        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Full H</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div style='display:flex;flex-wrap:wrap;justify-content:center;'>{_pond_boxes_html}</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.info(f"No saved records yet for {farm}.")
+
+# =========================================================================
 # STEP 4: POND DETAILS — pond selection bar, saved (read-only) history,
 # then a small spreadsheet for adding new records
 # =========================================================================
@@ -2013,351 +2358,6 @@ def _return_fragment():
             st.rerun()
 
 _return_fragment()
-
-# =========================================================================
-# POND LAYOUT — one card per Pond Number (that pond's most recent saved
-# record) for the selected Customer + Farm. Replaces the old "All Saved
-# Records" table that used to sit here. Same cards as the manager app
-# (manager.py): big DOC Today / Full H / Soon to be status, Stocking
-# Density, L.V.D (that pond's own saved Date), Feed/Day, ABW,
-# Expecting Harvest (KG) / Harvest Weight, Survival Rate, Issues, and the
-# pond's Total Harvest KG. Always reads fresh from the Google Sheet via
-# load_data(), so it reflects new saves, direct Sheet edits and
-# soft-deletes. View only — nothing here writes to the Sheet.
-# =========================================================================
-import re
-
-st.markdown("---")
-st.markdown(f"#### 🟦 Pond Layout — {farm}")
-
-df_farm_summary = load_data()
-_farm_required = {"Customer", "Farm Name with Code"}
-if len(df_farm_summary) > 0 and _farm_required.issubset(df_farm_summary.columns):
-    df_farm_summary = df_farm_summary[
-        (df_farm_summary["Customer"] == customer) & (df_farm_summary["Farm Name with Code"] == farm)
-    ].copy()
-else:
-    df_farm_summary = pd.DataFrame(columns=COLUMN_ORDER)
-
-if len(df_farm_summary) > 0 and "Pond Number" in df_farm_summary.columns and "Date" in df_farm_summary.columns:
-
-    # "DOC Today" = this row's saved DOC + however many days have passed
-    # between its Date and today. Rows whose Cycle Type is "Soon to be"
-    # stay 0. A row with a Full Harvest stops advancing at its Full
-    # Harvest date.
-    def _compute_doc_today(row):
-        if str(row.get("Cycle Type") or "").strip() == "Soon to be":
-            return "0"
-        parsed = pd.to_datetime(row.get("Date"), errors="coerce")
-        if pd.isna(parsed):
-            return ""
-        try:
-            doc_num = int(float(row.get("DOC")))
-        except (TypeError, ValueError):
-            return ""
-        _t2 = str(row.get("Harvest Type 2", "")).strip().lower()
-        _t1 = str(row.get("Harvest Type", "")).strip().lower()
-        _full_harvest_date_str = ""
-        if "full" in _t2:
-            _full_harvest_date_str = str(row.get("Harvest Date 2", "")).strip()
-        elif "full" in _t1:
-            _full_harvest_date_str = str(row.get("Harvest Date", "")).strip()
-        if _full_harvest_date_str:
-            _full_harvest_date = pd.to_datetime(_full_harvest_date_str, errors="coerce")
-            if pd.notna(_full_harvest_date):
-                return str(doc_num + (_full_harvest_date - parsed).days)
-        days_passed = (pd.Timestamp(date.today()) - parsed).days
-        return str(doc_num + days_passed)
-
-    df_farm_summary["DOC Today"] = df_farm_summary.apply(_compute_doc_today, axis=1)
-
-    # ---- Current-season helpers ------------------------------------------
-    # A pond can be re-stocked after a Full H (new season) while its old
-    # rows stay in the Sheet. A pond's history is cut at its LAST Full H:
-    # only rows saved AFTER it belong to the current season.
-    def _current_season_rows(group):
-        g = group.sort_values("Timestamp", kind="mergesort").reset_index(drop=True)
-        full_flag = (
-            g["Harvest Type"].astype(str).str.lower().str.contains("full")
-            | g["Harvest Type 2"].astype(str).str.lower().str.contains("full")
-        )
-        full_positions = [i for i, f in enumerate(full_flag.tolist()) if f]
-        if full_positions:
-            g = g.iloc[full_positions[-1] + 1:]
-        return g
-
-    def _has_partial_current_season(group):
-        g = _current_season_rows(group)
-        return bool((
-            g["Harvest Type"].astype(str).str.lower().str.contains("partial")
-            | g["Harvest Type 2"].astype(str).str.lower().str.contains("partial")
-        ).any())
-
-    _pond_latest = (
-        df_farm_summary.assign(_PondSortDate=pd.to_datetime(df_farm_summary["Date"], errors="coerce"))
-        .dropna(subset=["_PondSortDate"])
-        .sort_values("_PondSortDate")
-        .groupby("Pond Number", as_index=False)
-        .last()
-        .sort_values("Pond Number")
-    )
-
-    def _escape_html_pond(v):
-        return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    def _pond_harvest_type(prow):
-        return str(prow.get("Harvest Type 2", "")).strip() or str(prow.get("Harvest Type", "")).strip()
-
-    # A pond keeps showing Partial H if it had a Partial harvest in its
-    # CURRENT SEASON (rows after its last Full H) — not just its most
-    # recent row. Full H only reflects the pond's latest record.
-    _partial_history_by_pond = {
-        _pn: _has_partial_current_season(_g)
-        for _pn, _g in df_farm_summary.groupby("Pond Number")
-    }
-
-    # A Harvest KG cell is normally a plain number, but a multi-pond
-    # harvest is entered as the COMBINED total with the pond count in
-    # brackets, e.g. "2000 (2)" -> each pond's share = 2000 / 2 = 1000.
-    def _parse_pond_harvest_kg(raw_value):
-        _s = str(raw_value).strip()
-        if not _s:
-            return float("nan")
-        _match = re.match(r"^([\d,]+(?:\.\d+)?)\s*\(\s*(\d+)\s*\)\s*$", _s)
-        if _match:
-            _total = pd.to_numeric(_match.group(1).replace(",", ""), errors="coerce")
-            _count = pd.to_numeric(_match.group(2), errors="coerce")
-            if pd.notna(_total) and pd.notna(_count) and _count > 0:
-                return _total / _count
-            return float("nan")
-        return pd.to_numeric(_s.replace(",", ""), errors="coerce")
-
-    # Total Harvest KG per pond — summed across every harvest slot (with a
-    # filled-in Type) of the pond's CURRENT season rows.
-    def _harvest_kg_sum_row(row):
-        _row_total = 0.0
-        _t1 = str(row.get("Harvest Type", "")).strip()
-        _kg1 = _parse_pond_harvest_kg(row.get("Harvest KG", ""))
-        if _t1 and pd.notna(_kg1):
-            _row_total += _kg1
-        _t2 = str(row.get("Harvest Type 2", "")).strip()
-        _kg2 = _parse_pond_harvest_kg(row.get("Harvest KG 2", ""))
-        if _t2 and pd.notna(_kg2):
-            _row_total += _kg2
-        return _row_total
-
-    # The "Total: X KG" on a card counts the harvests of the pond's CURRENT
-    # season only, so a restocked pond doesn't carry the previous season's
-    # harvest total.
-    def _display_season_rows(group):
-        g = group.sort_values("Timestamp", kind="mergesort").reset_index(drop=True)
-        _full_flag = (
-            g["Harvest Type"].astype(str).str.lower().str.contains("full")
-            | g["Harvest Type 2"].astype(str).str.lower().str.contains("full")
-        )
-        _full_pos = [i for i, f in enumerate(_full_flag.tolist()) if f]
-        if not _full_pos:
-            return g
-        if _full_pos[-1] == len(g) - 1:
-            _start = _full_pos[-2] + 1 if len(_full_pos) > 1 else 0
-            return g.iloc[_start:]
-        return g.iloc[_full_pos[-1] + 1:]
-
-    _total_harvest_kg_by_pond = {
-        _pn: sum(_harvest_kg_sum_row(_r) for _, _r in _display_season_rows(_g).iterrows())
-        for _pn, _g in df_farm_summary.groupby("Pond Number")
-    }
-
-    def _pond_status(prow):
-        _pond_no_status = prow.get("Pond Number", "")
-        _h_type_lower = _pond_harvest_type(prow).lower()
-        _has_partial_history = bool(_partial_history_by_pond.get(_pond_no_status, False))
-        if "full" in _h_type_lower:
-            return "Full H"
-        elif "partial" in _h_type_lower or _has_partial_history:
-            return "Partial H"
-        elif str(prow.get("Cycle Type", "")).strip() == "Soon to be":
-            return "Soon to be"
-        else:
-            return "Running"
-
-    def _pond_box_color(prow):
-        _status = _pond_status(prow)
-        if _status == "Partial H":
-            return "#fff3cd"  # yellow — Partial Harvest
-        elif _status == "Full H":
-            return "#d4edda"  # green — Full Harvest
-        elif _status == "Soon to be":
-            return "#e2e2e2"  # gray — cycle hasn't started yet
-        else:
-            return "#eaf4ff"  # default blue — no harvest yet
-
-    def _species_letter(prow):
-        _species = str(prow.get("Species Culture", "")).strip().lower()
-        if "vannamei" in _species:
-            return "V"
-        elif "monodon" in _species:
-            return "M"
-        else:
-            return ""
-
-    _pond_boxes_html = ""
-    for _, _prow in _pond_latest.iterrows():
-        _pond_no = _escape_html_pond(_prow.get("Pond Number", ""))
-        _box_color = _pond_box_color(_prow)
-        _status_box = _pond_status(_prow)
-
-        # ---- Detail lines shown on every card: Stocking Density, L.V.D
-        # (this pond's own saved Date), Feed/Day, ABW.
-        _density_val = pd.to_numeric(_prow.get("Density", ""), errors="coerce")
-        _density_str = f"{_density_val:,.0f}" if pd.notna(_density_val) else "-"
-        _lvd_str = _escape_html_pond(str(_prow.get("Date", "")).strip() or "-")
-        _feed_day_str = _escape_html_pond(_prow.get("Feed Per Day", "") or "-")
-        _abw_str = _escape_html_pond(_prow.get("ABW", "") or "-")
-        _extra_details_html = (
-            "<div style='font-size:0.85rem;color:#333;text-align:left;width:100%;"
-            "padding:0 8px;margin-top:4px;line-height:1.4;'>"
-            f"<div>Stocking Density - {_density_str}</div>"
-            f"<div>L.V.D - {_lvd_str}</div>"
-            f"<div>Feed/Day - {_feed_day_str} &nbsp;|&nbsp; ABW - {_abw_str}</div>"
-            "</div>"
-        )
-
-        # Issues (from this pond's latest saved record) — shown at the
-        # bottom inside the box, issue text in red.
-        _issues_val = str(_prow.get("Issues", "")).strip()
-        _issues_html = (
-            "<div style='margin-top:auto;width:100%;text-align:center;font-size:0.85rem;"
-            "font-weight:bold;border-top:1px dashed #bbb;padding-top:3px;'>"
-            "<span style='color:#333;'></span>"
-            f"<span style='color:red;'>{_escape_html_pond(_issues_val)}</span></div>"
-            if _issues_val and _issues_val.lower() != "nan" else ""
-        )
-
-        if _status_box == "Full H":
-            # Full H ponds: show "Full H" + its Harvest Date, plus the
-            # pond's Total Harvest KG instead of DOC Today.
-            _h_date = str(_prow.get("Harvest Date 2", "")).strip() or str(_prow.get("Harvest Date", "")).strip()
-            _h_date = _escape_html_pond(_h_date or "-")
-            _total_kg_box = _total_harvest_kg_by_pond.get(_prow.get("Pond Number", ""), 0)
-            _total_kg_html = (
-                f"<div style='font-size:0.75rem;color:#333;'>Total: {_total_kg_box:,.2f} KG</div>"
-                if _total_kg_box else ""
-            )
-            _box_middle_html = (
-                "<div style='font-size:1.2rem;font-weight:bold;color:red;'>Full H</div>"
-                f"<div style='font-size:0.75rem;color:#333;'>Harvest Date - {_h_date}</div>"
-                f"{_total_kg_html}"
-            )
-        elif _status_box == "Soon to be":
-            _box_middle_html = (
-                "<div style='font-size:1.1rem;font-weight:bold;color:#555;'>Soon to be</div>"
-            )
-        else:
-            # Running / Partial H ponds: DOC Today number, with the pond's
-            # Started Date (today minus DOC Today days) under it. Partial H
-            # ponds also show the Total Harvest KG so far.
-            if _status_box == "Partial H":
-                _total_kg_box = _total_harvest_kg_by_pond.get(_prow.get("Pond Number", ""), 0)
-                _total_kg_html = (
-                    f"<div style='font-size:0.7rem;color:#333;'>Total: {_total_kg_box:,.2f} KG</div>"
-                    if _total_kg_box else ""
-                )
-            else:
-                _total_kg_html = ""
-
-            _doc_today_raw = _prow.get("DOC Today", "")
-            _doc_today_val = _escape_html_pond(_doc_today_raw or "-")
-            try:
-                _started_date = (
-                    pd.Timestamp(date.today()) - pd.Timedelta(days=int(float(_doc_today_raw)))
-                ).strftime("%Y-%m-%d")
-            except (TypeError, ValueError):
-                _started_label = "Started on ---"
-                _started_date = None
-            if _started_date is not None:
-                _started_label = f"Started on {_started_date}"
-            _box_middle_html = (
-                f"<div style='font-size:1.4rem;font-weight:bold;color:red;'>{_doc_today_val}</div>"
-                f"<div style='font-size:0.7rem;color:#777;'>{_escape_html_pond(_started_label)}</div>"
-                f"{_total_kg_html}"
-            )
-
-        # Expecting Harvest (KG) / Harvest Weight line ("2nd slot wins").
-        if _status_box == "Full H":
-            _t2_expect = str(_prow.get("Harvest Type 2", "")).strip().lower()
-            _kg2_expect = _parse_pond_harvest_kg(_prow.get("Harvest KG 2", ""))
-            _kg1_expect = _parse_pond_harvest_kg(_prow.get("Harvest KG", ""))
-            _harvest_kg_val = _kg2_expect if ("full" in _t2_expect and pd.notna(_kg2_expect)) else _kg1_expect
-            _expect_label = "Harvest Weight"
-            _expect_val = f"{_harvest_kg_val:,.2f} KG" if pd.notna(_harvest_kg_val) else "-"
-        elif _status_box == "Soon to be":
-            _expect_label = "Expecting Harvest"
-            _expect_val = "-"
-        else:
-            _expect_label = "Expecting Harvest"
-            _expect_kg = pd.to_numeric(_prow.get("Expect Harvest (KG)", ""), errors="coerce")
-            _expect_val = f"{_expect_kg:,.2f} KG" if pd.notna(_expect_kg) else "-"
-
-        _expect_html = (
-            "<div style='font-size:0.85rem;color:#333;text-align:center;width:100%;margin-top:4px;"
-            "border-top:1px dashed #bbb;padding-top:3px;'>"
-            f"<b>{_expect_label}:</b> {_escape_html_pond(_expect_val)}</div>"
-        )
-
-        # Survival Rate line — Survival QTY as a percentage of this pond's
-        # Density. Blank/zero/non-numeric values show "-".
-        _density_for_survival = pd.to_numeric(_prow.get("Density", ""), errors="coerce")
-        _survival_qty_val = pd.to_numeric(_prow.get("Survival QTY", ""), errors="coerce")
-        if pd.notna(_density_for_survival) and _density_for_survival > 0 and pd.notna(_survival_qty_val):
-            _survival_rate_str = f"{(_survival_qty_val / _density_for_survival) * 100:,.2f}%"
-        else:
-            _survival_rate_str = "-"
-        _survival_rate_html = (
-            "<div style='font-size:0.85rem;color:#333;text-align:center;width:100%;margin-top:2px;'>"
-            f"<b>Survival Rate:</b> {_escape_html_pond(_survival_rate_str)}</div>"
-        )
-
-        _species_label = _species_letter(_prow)
-        _species_html = (
-            f"<div style='font-size:0.75rem;font-weight:bold;color:#444;margin-top:2px;'>{_species_label}</div>"
-            if _species_label else ""
-        )
-
-        _pond_boxes_html += (
-            "<div style='display:flex;flex-direction:column;align-items:center;margin:6px;'>"
-            f"<div style='position:relative;width:210px;min-height:175px;border:2px solid #333;"
-            "border-radius:6px;display:flex;flex-direction:column;align-items:center;"
-            f"justify-content:flex-start;padding:8px 0;background:{_box_color};'>"
-            f"<div style='font-size:0.8rem;color:#555;'>Pond {_pond_no}</div>"
-            f"{_box_middle_html}"
-            f"{_expect_html}"
-            f"{_survival_rate_html}"
-            f"{_extra_details_html}"
-            f"{_issues_html}"
-            "</div>"
-            f"{_species_html}"
-            "</div>"
-        )
-
-    st.markdown(
-        "<div style='display:flex;gap:18px;justify-content:center;margin-bottom:8px;font-size:0.85rem;'>"
-        "<div><span style='display:inline-block;width:14px;height:14px;background:#eaf4ff;"
-        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Running</div>"
-        "<div><span style='display:inline-block;width:14px;height:14px;background:#fff3cd;"
-        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Partial H</div>"
-        "<div><span style='display:inline-block;width:14px;height:14px;background:#d4edda;"
-        "border:1px solid #333;border-radius:3px;vertical-align:middle;margin-right:6px;'></span>Full H</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"<div style='display:flex;flex-wrap:wrap;justify-content:center;'>{_pond_boxes_html}</div>",
-        unsafe_allow_html=True,
-    )
-else:
-    st.info(f"No saved records yet for {farm}.")
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>KMN Aqua Services - Water Quality Monitoring System</p>",
